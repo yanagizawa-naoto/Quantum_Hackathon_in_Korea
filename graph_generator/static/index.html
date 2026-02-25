@@ -71,6 +71,7 @@
             <input type="number" id="edges" min="0" placeholder="auto">
         </div>
         <button id="generate-btn" onclick="generate()">生成</button>
+        <button id="split-btn" onclick="splitAll()">閉領域分割</button>
     </div>
     <div id="info" class="info"></div>
     <div id="error" class="error"></div>
@@ -78,6 +79,12 @@
 
     <script>
         let network = null;
+        let currentGraph = null;
+        let edgesDataSet = null;
+        let edgeKeyToId = new Map();
+        let facePolygons = null;
+        let faceColors = null;
+        const DEFAULT_EDGE_COLOR = '#999';
 
         async function generate() {
             const btn = document.getElementById('generate-btn');
@@ -119,6 +126,7 @@
 
                 const data = await res.json();
                 infoDiv.textContent = `頂点数: ${data.num_vertices} / エッジ数: ${data.num_edges}`;
+                currentGraph = data;
                 renderGraph(data);
             } catch (e) {
                 errorDiv.textContent = e.message;
@@ -183,6 +191,458 @@
 
             if (network) network.destroy();
             network = new vis.Network(container, { nodes, edges }, options);
+            edgesDataSet = edges;
+            edgeKeyToId = new Map();
+            facePolygons = null;
+            faceColors = null;
+            data.edges.forEach((e, i) => {
+                const a = Math.min(e.source, e.target);
+                const b = Math.max(e.source, e.target);
+                edgeKeyToId.set(`${a}-${b}`, i);
+            });
+
+            network.on('beforeDrawing', drawFaces);
+        }
+
+        async function splitAll() {
+            const errorDiv = document.getElementById('error');
+            const infoDiv = document.getElementById('info');
+            errorDiv.textContent = '';
+            if (!currentGraph) {
+                errorDiv.textContent = '先にグラフを生成してください';
+                return;
+            }
+
+            try {
+                const res = await fetch('/graph/faces', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        num_vertices: currentGraph.num_vertices,
+                        edges: currentGraph.edges,
+                        positions: currentGraph.positions,
+                    }),
+                });
+
+                if (!res.ok) {
+                    const data = await res.json();
+                    throw new Error(data.detail || 'API error');
+                }
+
+                const data = await res.json();
+                const facesAll = data.faces || [];
+                const outerIdx = data.outer_face_index;
+                let faces = facesAll;
+                if (outerIdx !== null && outerIdx !== undefined) {
+                    faces = facesAll.filter((_, i) => i !== outerIdx);
+                }
+
+                if (faces.length === 0) {
+                    errorDiv.textContent = '分割できる面がありません';
+                    return;
+                }
+
+                facePolygons = faces;
+                const assignment = assignRegionsGreedyNoHoles(
+                    facesAll,
+                    outerIdx,
+                    currentGraph.positions
+                );
+                const k = assignment.regionCount;
+                const regionColors = Array.from({ length: k }, (_, i) => randomPastel(i + 1));
+                faceColors = assignment.regions.map(regionId => regionColors[regionId]);
+                infoDiv.textContent = `領域数: ${k} / 面数: ${faces.length}（外面除外）`;
+                network.redraw();
+            } catch (e) {
+                errorDiv.textContent = e.message;
+            }
+        }
+
+        function drawFaces(ctx) {
+            if (!facePolygons || !faceColors || !network) return;
+            const positions = network.getPositions();
+            ctx.save();
+            ctx.globalAlpha = 0.45;
+            for (let i = 0; i < facePolygons.length; i++) {
+                const face = facePolygons[i];
+                const color = faceColors[i];
+                if (!face || face.length < 3) continue;
+                const p0 = positions[face[0]];
+                if (!p0) continue;
+                ctx.beginPath();
+                ctx.moveTo(p0.x, p0.y);
+                for (let j = 1; j < face.length; j++) {
+                    const p = positions[face[j]];
+                    if (!p) continue;
+                    ctx.lineTo(p.x, p.y);
+                }
+                ctx.closePath();
+                ctx.fillStyle = color;
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        function randomPastel(seed) {
+            const x = Math.sin(seed * 999 + 13) * 10000;
+            const r = Math.floor(180 + (x - Math.floor(x)) * 60);
+            const g = Math.floor(180 + (Math.sin(seed * 123 + 7) + 1) * 30);
+            const b = Math.floor(180 + (Math.sin(seed * 321 + 11) + 1) * 30);
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        function randomRegionCount(minK, maxK) {
+            if (maxK <= minK) return minK;
+            return Math.floor(Math.random() * (maxK - minK + 1)) + minK;
+        }
+
+        function assignRegionsBySharedEdges(faces, desiredCount) {
+            const faceCount = faces.length;
+            const regions = new Array(faceCount).fill(-1);
+
+            // Build adjacency by shared edges
+            const edgeToFaces = new Map();
+            for (let i = 0; i < faceCount; i++) {
+                const face = faces[i];
+                for (let j = 0; j < face.length; j++) {
+                    const a = face[j];
+                    const b = face[(j + 1) % face.length];
+                    const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+                    if (!edgeToFaces.has(key)) edgeToFaces.set(key, []);
+                    edgeToFaces.get(key).push(i);
+                }
+            }
+
+            const adj = Array.from({ length: faceCount }, () => new Set());
+            edgeToFaces.forEach(list => {
+                if (list.length < 2) return;
+                for (let i = 0; i < list.length; i++) {
+                    for (let j = i + 1; j < list.length; j++) {
+                        adj[list[i]].add(list[j]);
+                        adj[list[j]].add(list[i]);
+                    }
+                }
+            });
+
+            // Find connected components in face adjacency graph
+            const components = [];
+            const visited = new Array(faceCount).fill(false);
+            for (let i = 0; i < faceCount; i++) {
+                if (visited[i]) continue;
+                const stack = [i];
+                visited[i] = true;
+                const comp = [];
+                while (stack.length) {
+                    const v = stack.pop();
+                    comp.push(v);
+                    adj[v].forEach(nb => {
+                        if (!visited[nb]) {
+                            visited[nb] = true;
+                            stack.push(nb);
+                        }
+                    });
+                }
+                components.push(comp);
+            }
+
+            const compCount = components.length;
+            const maxK = faceCount;
+            let regionCount;
+            if (desiredCount !== null && desiredCount !== undefined) {
+                regionCount = Math.max(compCount, Math.min(maxK, desiredCount));
+            } else {
+                regionCount = randomRegionCount(compCount, maxK);
+            }
+
+            // Allocate region counts per component (at least 1 each, capped by size)
+            const compRegions = components.map(c => 1);
+            let remaining = regionCount - compCount;
+            while (remaining > 0) {
+                const idx = Math.floor(Math.random() * compRegions.length);
+                if (compRegions[idx] < components[idx].length) {
+                    compRegions[idx]++;
+                    remaining--;
+                }
+            }
+
+            // Assign regions within each component by BFS growth
+            let regionBase = 0;
+            for (let ci = 0; ci < components.length; ci++) {
+                const comp = components[ci];
+                const k = compRegions[ci];
+
+                // shuffle faces in component
+                const compFaces = comp.slice();
+                for (let i = compFaces.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [compFaces[i], compFaces[j]] = [compFaces[j], compFaces[i]];
+                }
+
+                const seeds = compFaces.slice(0, k);
+                const frontiers = Array.from({ length: k }, () => []);
+                for (let r = 0; r < k; r++) {
+                    const f = seeds[r];
+                    regions[f] = regionBase + r;
+                    frontiers[r].push(f);
+                }
+
+                let assigned = k;
+                while (assigned < comp.length) {
+                    let progressed = false;
+                    for (let r = 0; r < k; r++) {
+                        if (frontiers[r].length === 0) continue;
+                        const current = frontiers[r].shift();
+                        const neighbors = Array.from(adj[current]).filter(v => regions[v] === -1);
+                        for (let i = neighbors.length - 1; i > 0; i--) {
+                            const j = Math.floor(Math.random() * (i + 1));
+                            [neighbors[i], neighbors[j]] = [neighbors[j], neighbors[i]];
+                        }
+                        for (const nb of neighbors) {
+                            regions[nb] = regionBase + r;
+                            frontiers[r].push(nb);
+                            assigned++;
+                            progressed = true;
+                        }
+                    }
+
+                    if (!progressed) {
+                        // Fallback: assign any remaining face to a random region to avoid infinite loop
+                        const remainingIdx = comp.find(v => regions[v] === -1);
+                        if (remainingIdx === undefined) break;
+                        const r = Math.floor(Math.random() * k);
+                        regions[remainingIdx] = regionBase + r;
+                        frontiers[r].push(remainingIdx);
+                        assigned++;
+                    }
+                }
+
+                regionBase += k;
+            }
+
+            return { regions, regionCount };
+        }
+
+        function assignRegionsGreedyNoHoles(facesAll, outerIdx, positions) {
+            const faceCountAll = facesAll.length;
+            if (outerIdx === null || outerIdx === undefined) {
+                // fallback: no outer face info, treat all as internal
+                return assignRegionsGreedyNoCycles(facesAll, positions);
+            }
+
+            const internalIds = [];
+            for (let i = 0; i < faceCountAll; i++) {
+                if (i !== outerIdx) internalIds.push(i);
+            }
+            const m = internalIds.length;
+            const idToInternal = new Map();
+            internalIds.forEach((id, idx) => idToInternal.set(id, idx));
+
+            const edgeToFaces = new Map();
+            for (let i = 0; i < faceCountAll; i++) {
+                const face = facesAll[i];
+                for (let j = 0; j < face.length; j++) {
+                    const a = face[j];
+                    const b = face[(j + 1) % face.length];
+                    const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+                    if (!edgeToFaces.has(key)) edgeToFaces.set(key, []);
+                    edgeToFaces.get(key).push(i);
+                }
+            }
+
+            const adj = Array.from({ length: m }, () => new Set());
+            const outerAdj = new Set();
+            edgeToFaces.forEach(list => {
+                if (list.length < 2) return;
+                for (let i = 0; i < list.length; i++) {
+                    for (let j = i + 1; j < list.length; j++) {
+                        const a = list[i];
+                        const b = list[j];
+                        if (a === outerIdx && b !== outerIdx) {
+                            outerAdj.add(idToInternal.get(b));
+                        } else if (b === outerIdx && a !== outerIdx) {
+                            outerAdj.add(idToInternal.get(a));
+                        } else if (a !== outerIdx && b !== outerIdx) {
+                            const ia = idToInternal.get(a);
+                            const ib = idToInternal.get(b);
+                            adj[ia].add(ib);
+                            adj[ib].add(ia);
+                        }
+                    }
+                }
+            });
+
+            const facesInternal = internalIds.map(id => facesAll[id]);
+            const areas = facesInternal.map(face => Math.abs(polygonArea(face, positions)));
+
+            const regions = new Array(m).fill(-1);
+            const unassigned = new Set(Array.from({ length: m }, (_, i) => i));
+
+            function reachableFromOuter(excluding) {
+                const visited = new Set();
+                const queue = [];
+                outerAdj.forEach(i => {
+                    if (i === excluding) return;
+                    if (!unassigned.has(i)) return;
+                    visited.add(i);
+                    queue.push(i);
+                });
+                while (queue.length) {
+                    const v = queue.shift();
+                    adj[v].forEach(nb => {
+                        if (nb === excluding) return;
+                        if (!unassigned.has(nb)) return;
+                        if (visited.has(nb)) return;
+                        visited.add(nb);
+                        queue.push(nb);
+                    });
+                }
+                return visited;
+            }
+
+            let regionId = 0;
+            while (unassigned.size > 0) {
+                // seed: largest area face that is reachable from outer in current unassigned
+                const reachable = reachableFromOuter(null);
+                let seed = -1;
+                let bestArea = -1;
+                reachable.forEach(i => {
+                    if (areas[i] > bestArea) {
+                        bestArea = areas[i];
+                        seed = i;
+                    }
+                });
+                if (seed === -1) {
+                    // fallback: pick any
+                    seed = unassigned.values().next().value;
+                }
+
+                regions[seed] = regionId;
+                unassigned.delete(seed);
+
+                let grew = true;
+                while (grew) {
+                    grew = false;
+                    let bestFace = -1;
+                    let bestFaceArea = -1;
+                    unassigned.forEach(i => {
+                        // candidate: adjacent to region
+                        let adjacent = false;
+                        adj[i].forEach(nb => {
+                            if (regions[nb] === regionId) adjacent = true;
+                        });
+                        if (!adjacent) return;
+
+                        // check if removing i would disconnect remaining from outer
+                        const visited = reachableFromOuter(i);
+                        if (visited.size !== unassigned.size - 1) return;
+
+                        if (areas[i] > bestFaceArea) {
+                            bestFaceArea = areas[i];
+                            bestFace = i;
+                        }
+                    });
+
+                    if (bestFace !== -1) {
+                        regions[bestFace] = regionId;
+                        unassigned.delete(bestFace);
+                        grew = true;
+                    }
+                }
+
+                regionId++;
+            }
+
+            return {
+                regions,
+                regionCount: regionId,
+                faceIndexMap: internalIds,
+            };
+        }
+
+        function assignRegionsGreedyNoCycles(faces, positions) {
+            const faceCount = faces.length;
+            const regions = new Array(faceCount).fill(-1);
+
+            const edgeToFaces = new Map();
+            for (let i = 0; i < faceCount; i++) {
+                const face = faces[i];
+                for (let j = 0; j < face.length; j++) {
+                    const a = face[j];
+                    const b = face[(j + 1) % face.length];
+                    const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+                    if (!edgeToFaces.has(key)) edgeToFaces.set(key, []);
+                    edgeToFaces.get(key).push(i);
+                }
+            }
+
+            const adj = Array.from({ length: faceCount }, () => new Set());
+            edgeToFaces.forEach(list => {
+                if (list.length < 2) return;
+                for (let i = 0; i < list.length; i++) {
+                    for (let j = i + 1; j < list.length; j++) {
+                        adj[list[i]].add(list[j]);
+                        adj[list[j]].add(list[i]);
+                    }
+                }
+            });
+
+            const areas = faces.map(face => Math.abs(polygonArea(face, positions)));
+            const unassigned = new Set(Array.from({ length: faceCount }, (_, i) => i));
+
+            let regionId = 0;
+            while (unassigned.size > 0) {
+                let seed = -1;
+                let bestArea = -1;
+                unassigned.forEach(i => {
+                    if (areas[i] > bestArea) {
+                        bestArea = areas[i];
+                        seed = i;
+                    }
+                });
+                if (seed === -1) break;
+
+                regions[seed] = regionId;
+                unassigned.delete(seed);
+
+                let grew = true;
+                while (grew) {
+                    grew = false;
+                    let bestFace = -1;
+                    let bestFaceArea = -1;
+                    unassigned.forEach(i => {
+                        let neighborCount = 0;
+                        adj[i].forEach(nb => {
+                            if (regions[nb] === regionId) neighborCount++;
+                        });
+                        if (neighborCount === 0) return;
+                        if (neighborCount >= 2) return;
+                        if (areas[i] > bestFaceArea) {
+                            bestFaceArea = areas[i];
+                            bestFace = i;
+                        }
+                    });
+
+                    if (bestFace !== -1) {
+                        regions[bestFace] = regionId;
+                        unassigned.delete(bestFace);
+                        grew = true;
+                    }
+                }
+
+                regionId++;
+            }
+
+            return { regions, regionCount: regionId };
+        }
+
+        function polygonArea(face, positions) {
+            let area = 0;
+            for (let i = 0; i < face.length; i++) {
+                const a = positions[face[i]] ?? positions[String(face[i])];
+                const b = positions[face[(i + 1) % face.length]] ?? positions[String(face[(i + 1) % face.length])];
+                area += a.x * b.y - b.x * a.y;
+            }
+            return area * 0.5;
         }
     </script>
 </body>

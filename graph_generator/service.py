@@ -212,3 +212,59 @@ def generate_connected_graph(
         "edges": edges_out,
         "positions": positions,
     }
+
+
+def compute_planar_faces(num_vertices: int, edges: list, positions: dict) -> dict:
+    """平面埋め込みの面（閉領域）を列挙して返す。
+
+    positions は outer face を判定するために使用する。
+    """
+    n = num_vertices
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for e in edges:
+        G.add_edge(int(e["source"]), int(e["target"]))
+
+    planar, embedding = nx.check_planarity(G)
+    if not planar:
+        raise ValueError("グラフが平面ではありません")
+
+    # directed edge ごとに面をたどって列挙
+    seen = set()
+    faces = []
+    for u in embedding:
+        for v in embedding.neighbors_cw_order(u):
+            if (u, v) in seen:
+                continue
+            face = embedding.traverse_face(u, v)
+            if len(face) < 3:
+                # 面として無効
+                continue
+            # mark directed edges along this face
+            for i in range(len(face)):
+                a = face[i]
+                b = face[(i + 1) % len(face)]
+                seen.add((a, b))
+            faces.append(face)
+
+    if not faces:
+        return {"faces": [], "outer_face_index": None}
+
+    # outer face を面積最大の多角形として推定
+    def get_pos(node_id):
+        if node_id in positions:
+            return positions[node_id]
+        return positions.get(str(node_id))
+
+    def polygon_area(face_nodes):
+        area = 0.0
+        for i in range(len(face_nodes)):
+            a = get_pos(face_nodes[i])
+            b = get_pos(face_nodes[(i + 1) % len(face_nodes)])
+            area += a["x"] * b["y"] - b["x"] * a["y"]
+        return area * 0.5
+
+    areas = [abs(polygon_area(face)) for face in faces]
+    outer_idx = int(np.argmax(areas)) if areas else None
+
+    return {"faces": faces, "outer_face_index": outer_idx}
