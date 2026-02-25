@@ -110,7 +110,7 @@ def _process_solution(
     final_edges = []
     for u_canon, v_canon in canonical_edges:
         var_name = f"x_{u_canon}_{v_canon}"
-        if best_sample[var_name] == 1:
+        if best_sample.get(var_name, 0) == 1:
             final_edges.append(EdgeDto(_from=v_canon, to=u_canon))
         else:
             final_edges.append(EdgeDto(_from=u_canon, to=v_canon))
