@@ -9,3 +9,5 @@ class EdgeDto:
 @dataclass
 class ResponseDto:
     edges: List[EdgeDto]
+    optimized_graph_score: float
+    bidirectional_graph_score: float
