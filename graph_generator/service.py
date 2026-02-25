@@ -4,9 +4,11 @@ from typing import Optional
 
 import networkx as nx
 import numpy as np
+import json
+import os
 
 
-def _optimize_layout(G, side, iterations=150):
+def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
     """planar_layout を正方形に引き伸ばし、4種の力で最適化する（交差0保証）。"""
     nodes = sorted(G.nodes())
     n = len(nodes)
@@ -15,9 +17,10 @@ def _optimize_layout(G, side, iterations=150):
     edge_arr = np.array(edges, dtype=int)
     adj = [list(G.neighbors(v)) for v in range(n)]
     margin = side * 0.04
+    fixed = set() if fixed is None else set(fixed)
 
     # 初期配置: planar_layout → 正方形全体にスケーリング（アフィン変換は交差0を保持）
-    planar_pos = nx.planar_layout(G)
+    planar_pos = initial_pos if initial_pos is not None else nx.planar_layout(G)
     pos = np.zeros((n, 2))
     for v in range(n):
         pos[v] = planar_pos[v]
@@ -120,6 +123,8 @@ def _optimize_layout(G, side, iterations=150):
         order = list(range(n))
         random.shuffle(order)
         for vn in order:
+            if vn in fixed:
+                continue
             d = np.linalg.norm(disp[vn])
             if d < 1e-10:
                 continue
@@ -132,6 +137,53 @@ def _optimize_layout(G, side, iterations=150):
                 pos[vn] = old_pos
 
     return {v: pos[v] for v in range(n)}
+
+
+def _tutte_layout(G, outer_face, side, iterations=600):
+    """外面を凸多角形に固定し、内部を重心で緩和する。"""
+    n = G.number_of_nodes()
+    pos = np.zeros((n, 2))
+    margin = side * 0.08
+    radius = (side - 2 * margin) * 0.5
+    center = np.array([side / 2, side / 2])
+
+    boundary = list(outer_face)
+    m = len(boundary)
+    for i, v in enumerate(boundary):
+        theta = 2.0 * math.pi * i / m
+        pos[v] = center + radius * np.array([math.cos(theta), math.sin(theta)])
+
+    interior = [v for v in range(n) if v not in boundary]
+    if interior:
+        init = nx.planar_layout(G)
+        for v in interior:
+            pos[v] = init[v]
+
+        # scale interior into box
+        for dim in range(2):
+            mn, mx = pos[interior, dim].min(), pos[interior, dim].max()
+            rng = mx - mn
+            if rng > 1e-10:
+                pos[interior, dim] = (pos[interior, dim] - mn) / rng * (side - 2 * margin) + margin
+            else:
+                pos[interior, dim] = side / 2
+
+        # barycentric relaxation
+        for _ in range(iterations):
+            max_delta = 0.0
+            for v in interior:
+                nbrs = list(G.neighbors(v))
+                if not nbrs:
+                    continue
+                avg = pos[nbrs].mean(axis=0)
+                delta = np.linalg.norm(avg - pos[v])
+                pos[v] = avg
+                if delta > max_delta:
+                    max_delta = delta
+            if max_delta < 1e-4:
+                break
+
+    return {v: pos[v] for v in range(n)}, set(boundary)
 
 
 def generate_connected_graph(
@@ -165,37 +217,83 @@ def generate_connected_graph(
                 f"平面グラフの場合、頂点数 {num_vertices} の最大辺数は {max_edges} です"
             )
 
-    G = nx.Graph()
-    G.add_nodes_from(range(n))
+    def has_bridge(graph: nx.Graph) -> bool:
+        return any(True for _ in nx.bridges(graph))
 
-    # ステップ1: ランダムな極大平面グラフを構築
-    all_edges = [(i, j) for i in range(n) for j in range(i + 1, n)]
-    random.shuffle(all_edges)
+    # 2-edge-connected (no bridges), min degree >=2, planar, connected
+    max_attempts = 30
+    for _ in range(max_attempts):
+        G = nx.Graph()
+        G.add_nodes_from(range(n))
 
-    planar_max = 3 * n - 6
-    for u, v in all_edges:
-        if G.number_of_edges() >= planar_max:
-            break
-        G.add_edge(u, v)
-        if not nx.check_planarity(G)[0]:
-            G.remove_edge(u, v)
+        # ステップ1: ランダムな極大平面グラフを構築
+        all_edges = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        random.shuffle(all_edges)
 
-    # ステップ2: 辺を削除して目標辺数に近づける
-    edges_list = list(G.edges())
-    random.shuffle(edges_list)
-
-    for u, v in edges_list:
-        if G.number_of_edges() <= num_edges:
-            break
-        if G.degree(u) <= 2 or G.degree(v) <= 2:
-            continue
-        G.remove_edge(u, v)
-        if not nx.is_connected(G):
+        planar_max = 3 * n - 6
+        for u, v in all_edges:
+            if G.number_of_edges() >= planar_max:
+                break
             G.add_edge(u, v)
+            if not nx.check_planarity(G)[0]:
+                G.remove_edge(u, v)
+
+        # 極大平面グラフは橋を持たないはずだが、安全確認
+        if has_bridge(G):
+            continue
+
+        # ステップ2: 辺を削除して目標辺数に近づける（橋を作らない）
+        edges_list = list(G.edges())
+        random.shuffle(edges_list)
+
+        for u, v in edges_list:
+            if G.number_of_edges() <= num_edges:
+                break
+            if G.degree(u) <= 2 or G.degree(v) <= 2:
+                continue
+            G.remove_edge(u, v)
+            if (not nx.is_connected(G)) or has_bridge(G):
+                G.add_edge(u, v)
+
+        if G.number_of_edges() == num_edges and nx.is_connected(G) and not has_bridge(G):
+            break
+    else:
+        raise ValueError("条件を満たすグラフ生成に失敗しました（橋なし条件）")
 
     # ステップ3: レイアウト最適化
     side = math.sqrt(n)
-    pos = _optimize_layout(G, side, iterations=150)
+    planar, embedding = nx.check_planarity(G)
+    if not planar:
+        raise ValueError("グラフが平面ではありません")
+
+    # 外面を推定（面積最大）
+    init_pos = nx.planar_layout(G)
+    faces = []
+    seen = set()
+    for u in embedding:
+        for v in embedding.neighbors_cw_order(u):
+            if (u, v) in seen:
+                continue
+            face = embedding.traverse_face(u, v)
+            if len(face) < 3:
+                continue
+            for i in range(len(face)):
+                a = face[i]
+                b = face[(i + 1) % len(face)]
+                seen.add((a, b))
+            faces.append(face)
+
+    def face_area(face_nodes):
+        area = 0.0
+        for i in range(len(face_nodes)):
+            a = init_pos[face_nodes[i]]
+            b = init_pos[face_nodes[(i + 1) % len(face_nodes)]]
+            area += a[0] * b[1] - b[0] * a[1]
+        return abs(area) * 0.5
+
+    outer_face = max(faces, key=face_area) if faces else list(G.nodes())
+    tut_pos, fixed = _tutte_layout(G, outer_face, side, iterations=600)
+    pos = _optimize_layout(G, side, iterations=150, initial_pos=tut_pos, fixed=fixed)
 
     positions = {
         int(v): {"x": float(pos[v][0]), "y": float(pos[v][1])}
@@ -268,3 +366,45 @@ def compute_planar_faces(num_vertices: int, edges: list, positions: dict) -> dic
     outer_idx = int(np.argmax(areas)) if areas else None
 
     return {"faces": faces, "outer_face_index": outer_idx}
+
+
+_SAVED_DIR = os.path.join(os.path.dirname(__file__), "saved")
+
+
+def _sanitize_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise ValueError("保存名が空です")
+    safe = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_"))
+    if not safe:
+        raise ValueError("保存名に使える文字がありません")
+    return safe
+
+
+def save_graph_json(name: str, data: dict) -> dict:
+    os.makedirs(_SAVED_DIR, exist_ok=True)
+    safe = _sanitize_name(name)
+    path = os.path.join(_SAVED_DIR, f"{safe}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"name": safe, "path": f"{safe}.json"}
+
+
+def list_saved_graphs() -> list:
+    if not os.path.isdir(_SAVED_DIR):
+        return []
+    files = []
+    for fn in os.listdir(_SAVED_DIR):
+        if fn.endswith(".json"):
+            files.append(fn[:-5])
+    files.sort()
+    return files
+
+
+def load_graph_json(name: str) -> dict:
+    safe = _sanitize_name(name)
+    path = os.path.join(_SAVED_DIR, f"{safe}.json")
+    if not os.path.isfile(path):
+        raise ValueError("保存されたグラフが見つかりません")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)

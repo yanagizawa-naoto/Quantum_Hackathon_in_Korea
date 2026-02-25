@@ -2,7 +2,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from graph_generator.service import generate_connected_graph, compute_planar_faces
+from graph_generator.service import (
+    generate_connected_graph,
+    compute_planar_faces,
+    save_graph_json,
+    list_saved_graphs,
+    load_graph_json,
+)
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -23,6 +29,12 @@ class FacePosition(BaseModel):
 
 
 class FacesRequest(BaseModel):
+    num_vertices: int = Field(..., ge=1, description="頂点数")
+    edges: list[FaceEdge]
+    positions: dict[int, FacePosition]
+
+class SaveGraphRequest(BaseModel):
+    name: str = Field(..., min_length=1, description="保存名")
     num_vertices: int = Field(..., ge=1, description="頂点数")
     edges: list[FaceEdge]
     positions: dict[int, FacePosition]
@@ -48,3 +60,31 @@ async def list_faces(request: FacesRequest):
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/save")
+async def save_graph(request: SaveGraphRequest):
+    try:
+        data = {
+            "num_vertices": request.num_vertices,
+            "edges": [e.model_dump() for e in request.edges],
+            "positions": {int(k): v.model_dump() for k, v in request.positions.items()},
+        }
+        result = save_graph_json(request.name, data)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/list")
+async def list_graphs():
+    return {"files": list_saved_graphs()}
+
+
+@router.get("/load/{name}")
+async def load_graph(name: str):
+    try:
+        data = load_graph_json(name)
+        return data
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

@@ -73,6 +73,19 @@
         <button id="generate-btn" onclick="generate()">生成</button>
         <button id="split-btn" onclick="splitAll()">閉領域分割</button>
     </div>
+    <div class="controls">
+        <div class="field">
+            <label for="save-name">保存名</label>
+            <input type="text" id="save-name" placeholder="example-graph">
+        </div>
+        <button id="save-btn" onclick="saveGraph()">保存</button>
+        <div class="field">
+            <label for="load-select">読み込み</label>
+            <select id="load-select"></select>
+        </div>
+        <button id="load-btn" onclick="loadGraph()">読み込み</button>
+        <button id="refresh-btn" onclick="refreshSavedList()">一覧更新</button>
+    </div>
     <div id="info" class="info"></div>
     <div id="error" class="error"></div>
     <div id="graph-container"></div>
@@ -202,6 +215,7 @@
             });
 
             network.on('beforeDrawing', drawFaces);
+            network.on('dragEnd', syncPositionsFromNetwork);
         }
 
         async function splitAll() {
@@ -243,7 +257,7 @@
                 }
 
                 facePolygons = faces;
-                const assignment = assignRegionsGreedyNoHoles(
+                const assignment = assignRegionsGreedyBoundary(
                     facesAll,
                     outerIdx,
                     currentGraph.positions
@@ -253,6 +267,87 @@
                 faceColors = assignment.regions.map(regionId => regionColors[regionId]);
                 infoDiv.textContent = `領域数: ${k} / 面数: ${faces.length}（外面除外）`;
                 network.redraw();
+            } catch (e) {
+                errorDiv.textContent = e.message;
+            }
+        }
+
+        async function refreshSavedList() {
+            const select = document.getElementById('load-select');
+            select.innerHTML = '';
+            try {
+                const res = await fetch('/graph/list');
+                if (!res.ok) throw new Error('API error');
+                const data = await res.json();
+                const files = data.files || [];
+                files.forEach(name => {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    select.appendChild(opt);
+                });
+            } catch (e) {
+                // no-op
+            }
+        }
+
+        async function saveGraph() {
+            const errorDiv = document.getElementById('error');
+            const infoDiv = document.getElementById('info');
+            errorDiv.textContent = '';
+            if (!currentGraph) {
+                errorDiv.textContent = '先にグラフを生成してください';
+                return;
+            }
+            const name = document.getElementById('save-name').value.trim();
+            if (!name) {
+                errorDiv.textContent = '保存名を入力してください';
+                return;
+            }
+            try {
+                syncPositionsFromNetwork();
+                const res = await fetch('/graph/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name,
+                        num_vertices: currentGraph.num_vertices,
+                        edges: currentGraph.edges,
+                        positions: currentGraph.positions,
+                    }),
+                });
+                if (!res.ok) {
+                    const data = await res.json();
+                    throw new Error(data.detail || 'API error');
+                }
+                const data = await res.json();
+                infoDiv.textContent = `保存しました: ${data.name}`;
+                await refreshSavedList();
+            } catch (e) {
+                errorDiv.textContent = e.message;
+            }
+        }
+
+        async function loadGraph() {
+            const errorDiv = document.getElementById('error');
+            const infoDiv = document.getElementById('info');
+            errorDiv.textContent = '';
+            const select = document.getElementById('load-select');
+            const name = select.value;
+            if (!name) {
+                errorDiv.textContent = '読み込み対象を選択してください';
+                return;
+            }
+            try {
+                const res = await fetch(`/graph/load/${encodeURIComponent(name)}`);
+                if (!res.ok) {
+                    const data = await res.json();
+                    throw new Error(data.detail || 'API error');
+                }
+                const data = await res.json();
+                currentGraph = data;
+                renderGraph(data);
+                infoDiv.textContent = `読み込みました: ${name}`;
             } catch (e) {
                 errorDiv.textContent = e.message;
             }
@@ -422,10 +517,9 @@
             return { regions, regionCount };
         }
 
-        function assignRegionsGreedyNoHoles(facesAll, outerIdx, positions) {
+        function assignRegionsGreedyBoundary(facesAll, outerIdx, positions) {
             const faceCountAll = facesAll.length;
             if (outerIdx === null || outerIdx === undefined) {
-                // fallback: no outer face info, treat all as internal
                 return assignRegionsGreedyNoCycles(facesAll, positions);
             }
 
@@ -436,6 +530,8 @@
             const m = internalIds.length;
             const idToInternal = new Map();
             internalIds.forEach((id, idx) => idToInternal.set(id, idx));
+
+            const outerVertices = new Set(facesAll[outerIdx] || []);
 
             const edgeToFaces = new Map();
             for (let i = 0; i < faceCountAll; i++) {
@@ -450,23 +546,17 @@
             }
 
             const adj = Array.from({ length: m }, () => new Set());
-            const outerAdj = new Set();
             edgeToFaces.forEach(list => {
                 if (list.length < 2) return;
                 for (let i = 0; i < list.length; i++) {
                     for (let j = i + 1; j < list.length; j++) {
                         const a = list[i];
                         const b = list[j];
-                        if (a === outerIdx && b !== outerIdx) {
-                            outerAdj.add(idToInternal.get(b));
-                        } else if (b === outerIdx && a !== outerIdx) {
-                            outerAdj.add(idToInternal.get(a));
-                        } else if (a !== outerIdx && b !== outerIdx) {
-                            const ia = idToInternal.get(a);
-                            const ib = idToInternal.get(b);
-                            adj[ia].add(ib);
-                            adj[ib].add(ia);
-                        }
+                        if (a === outerIdx || b === outerIdx) continue;
+                        const ia = idToInternal.get(a);
+                        const ib = idToInternal.get(b);
+                        adj[ia].add(ib);
+                        adj[ib].add(ia);
                     }
                 }
             });
@@ -474,77 +564,106 @@
             const facesInternal = internalIds.map(id => facesAll[id]);
             const areas = facesInternal.map(face => Math.abs(polygonArea(face, positions)));
 
+            // incident internal faces per vertex
+            const incident = new Map();
+            for (let i = 0; i < m; i++) {
+                const face = facesInternal[i];
+                for (const v of face) {
+                    if (!incident.has(v)) incident.set(v, new Set());
+                    incident.get(v).add(i);
+                }
+            }
+
             const regions = new Array(m).fill(-1);
             const unassigned = new Set(Array.from({ length: m }, (_, i) => i));
 
-            function reachableFromOuter(excluding) {
-                const visited = new Set();
-                const queue = [];
-                outerAdj.forEach(i => {
-                    if (i === excluding) return;
-                    if (!unassigned.has(i)) return;
-                    visited.add(i);
-                    queue.push(i);
-                });
-                while (queue.length) {
-                    const v = queue.shift();
-                    adj[v].forEach(nb => {
-                        if (nb === excluding) return;
-                        if (!unassigned.has(nb)) return;
-                        if (visited.has(nb)) return;
-                        visited.add(nb);
-                        queue.push(nb);
+            function wouldCreateInteriorVertex(regionFaces, candidate) {
+                const next = new Set(regionFaces);
+                next.add(candidate);
+                const face = facesInternal[candidate];
+                for (const v of face) {
+                    if (outerVertices.has(v)) continue;
+                    const inc = incident.get(v);
+                    if (!inc) continue;
+                    let allIn = true;
+                    inc.forEach(f => {
+                        if (!next.has(f)) allIn = false;
                     });
+                    if (allIn) return true;
                 }
-                return visited;
+                return false;
+            }
+
+            function boundaryVertexCount(regionFaces) {
+                const verts = new Set();
+                regionFaces.forEach(f => {
+                    facesInternal[f].forEach(v => verts.add(v));
+                });
+                let count = 0;
+                verts.forEach(v => {
+                    if (outerVertices.has(v)) {
+                        count++;
+                        return;
+                    }
+                    const inc = incident.get(v);
+                    let allIn = true;
+                    inc.forEach(f => {
+                        if (!regionFaces.has(f)) allIn = false;
+                    });
+                    if (!allIn) count++;
+                });
+                return count;
             }
 
             let regionId = 0;
             while (unassigned.size > 0) {
-                // seed: largest area face that is reachable from outer in current unassigned
-                const reachable = reachableFromOuter(null);
+                // seed: unassigned face with largest area
                 let seed = -1;
                 let bestArea = -1;
-                reachable.forEach(i => {
+                unassigned.forEach(i => {
                     if (areas[i] > bestArea) {
                         bestArea = areas[i];
                         seed = i;
                     }
                 });
-                if (seed === -1) {
-                    // fallback: pick any
-                    seed = unassigned.values().next().value;
-                }
+                if (seed === -1) break;
 
+                const regionFaces = new Set([seed]);
                 regions[seed] = regionId;
                 unassigned.delete(seed);
 
                 let grew = true;
                 while (grew) {
                     grew = false;
-                    let bestFace = -1;
-                    let bestFaceArea = -1;
+                    let bestCandidate = -1;
+                    let bestBoundary = -1;
+                    let bestAreaLocal = -1;
+
+                    const candidates = [];
                     unassigned.forEach(i => {
-                        // candidate: adjacent to region
                         let adjacent = false;
                         adj[i].forEach(nb => {
-                            if (regions[nb] === regionId) adjacent = true;
+                            if (regionFaces.has(nb)) adjacent = true;
                         });
-                        if (!adjacent) return;
-
-                        // check if removing i would disconnect remaining from outer
-                        const visited = reachableFromOuter(i);
-                        if (visited.size !== unassigned.size - 1) return;
-
-                        if (areas[i] > bestFaceArea) {
-                            bestFaceArea = areas[i];
-                            bestFace = i;
-                        }
+                        if (adjacent) candidates.push(i);
                     });
 
-                    if (bestFace !== -1) {
-                        regions[bestFace] = regionId;
-                        unassigned.delete(bestFace);
+                    for (const cand of candidates) {
+                        if (wouldCreateInteriorVertex(regionFaces, cand)) continue;
+                        const next = new Set(regionFaces);
+                        next.add(cand);
+                        const bcount = boundaryVertexCount(next);
+                        if (bcount > bestBoundary || (bcount === bestBoundary && areas[cand] > bestAreaLocal)) {
+                            bestBoundary = bcount;
+                            bestAreaLocal = areas[cand];
+                            bestCandidate = cand;
+                        }
+                    }
+
+                    if (bestCandidate !== -1) {
+                        regionFaces.add(bestCandidate);
+                        regions[bestCandidate] = regionId;
+                        unassigned.delete(bestCandidate);
                         grew = true;
                     }
                 }
@@ -552,11 +671,7 @@
                 regionId++;
             }
 
-            return {
-                regions,
-                regionCount: regionId,
-                faceIndexMap: internalIds,
-            };
+            return { regions, regionCount: regionId };
         }
 
         function assignRegionsGreedyNoCycles(faces, positions) {
@@ -644,6 +759,20 @@
             }
             return area * 0.5;
         }
+
+        function syncPositionsFromNetwork() {
+            if (!network || !currentGraph) return;
+            const positions = network.getPositions();
+            const updated = {};
+            Object.keys(positions).forEach(key => {
+                const id = parseInt(key, 10);
+                const p = positions[key];
+                updated[id] = { x: p.x, y: p.y };
+            });
+            currentGraph.positions = updated;
+        }
+
+        refreshSavedList();
     </script>
 </body>
 </html>
