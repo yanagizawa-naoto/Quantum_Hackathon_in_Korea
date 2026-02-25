@@ -5,6 +5,7 @@ from typing import Optional
 from graph_generator.service import (
     generate_connected_graph,
     compute_planar_faces,
+    optimize_edge_orientations,
     save_graph_json,
     list_saved_graphs,
     load_graph_json,
@@ -40,6 +41,13 @@ class SaveGraphRequest(BaseModel):
     num_vertices: int = Field(..., ge=1, description="頂点数")
     edges: list[FaceEdge]
     positions: dict[int, FacePosition]
+
+
+class OptimizeOrientationRequest(BaseModel):
+    num_vertices: int = Field(..., ge=1, description="頂点数")
+    edges: list[FaceEdge]
+    fixed_edges: list[FaceEdge] = Field(default_factory=list, description="固定向きの辺")
+    max_iterations: int = Field(1200, ge=100, le=10000, description="最適化反復数")
 
 
 @router.post("/generate")
@@ -92,3 +100,17 @@ async def load_graph(name: str):
         return data
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/optimize-orientation")
+async def optimize_orientation(request: OptimizeOrientationRequest):
+    try:
+        result = optimize_edge_orientations(
+            num_vertices=request.num_vertices,
+            edges=[e.model_dump() for e in request.edges],
+            fixed_edges=[e.model_dump() for e in request.fixed_edges],
+            max_iterations=request.max_iterations,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

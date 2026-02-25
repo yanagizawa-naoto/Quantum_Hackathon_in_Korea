@@ -462,6 +462,209 @@ def compute_planar_faces(
     }
 
 
+def optimize_edge_orientations(
+    num_vertices: int,
+    edges: list,
+    fixed_edges: Optional[list] = None,
+    max_iterations: int = 1200,
+    random_seed: Optional[int] = None,
+) -> dict:
+    """辺向きを最適化して、混雑集中を抑えた有向化を返す。
+
+    目的:
+    - 到達不能ペア数を最小化（最優先）
+    - 平均最短距離を短くする
+    - 辺利用集中（二乗和）を抑える
+    - 最大ボトルネックを抑える
+    """
+    n = int(num_vertices)
+    if n < 2:
+        raise ValueError("頂点数は2以上が必要です")
+
+    undirected_edges = []
+    seen_undirected = set()
+    for e in edges:
+        u = int(e["source"])
+        v = int(e["target"])
+        if u == v:
+            continue
+        key = (min(u, v), max(u, v))
+        if key in seen_undirected:
+            continue
+        seen_undirected.add(key)
+        undirected_edges.append(key)
+
+    if not undirected_edges:
+        raise ValueError("エッジがありません")
+
+    rng = random.Random(random_seed)
+
+    fixed_map = {}
+    fixed_edges = fixed_edges or []
+    for e in fixed_edges:
+        u = int(e["source"])
+        v = int(e["target"])
+        if u == v:
+            continue
+        key = (min(u, v), max(u, v))
+        if key not in seen_undirected:
+            continue
+        direction = (u, v) if u < v else (v, u)
+        # keyに対して向き+1: min->max, -1: max->min
+        sign = 1 if (u == key[0] and v == key[1]) else -1
+        if key in fixed_map and fixed_map[key] != sign:
+            raise ValueError("固定辺の向きに矛盾があります")
+        fixed_map[key] = sign
+
+    free_edges = [e for e in undirected_edges if e not in fixed_map]
+    if not free_edges:
+        directed_edges = []
+        for a, b in undirected_edges:
+            sign = fixed_map[(a, b)]
+            if sign == 1:
+                directed_edges.append({"source": a, "target": b})
+            else:
+                directed_edges.append({"source": b, "target": a})
+        metrics = _evaluate_orientation_metrics(n, undirected_edges, fixed_map)
+        return {
+            "directed_edges": directed_edges,
+            "fixed_edge_count": len(fixed_map),
+            "optimized_edge_count": 0,
+            "metrics": metrics,
+        }
+
+    def random_state():
+        state = {}
+        for key in free_edges:
+            state[key] = 1 if rng.random() < 0.5 else -1
+        return state
+
+    def merged_orientation(state):
+        orient = dict(fixed_map)
+        orient.update(state)
+        return orient
+
+    def score_of(state):
+        orient = merged_orientation(state)
+        metrics = _evaluate_orientation_metrics(n, undirected_edges, orient)
+        # 到達不能を最優先
+        score = (
+            metrics["unreachable_pairs"] * 10000.0
+            + metrics["average_distance"] * 1.0
+            + metrics["load_square_sum"] * 0.06
+            + metrics["max_load"] * 0.8
+        )
+        return score, metrics
+
+    current_state = random_state()
+    current_score, current_metrics = score_of(current_state)
+    best_state = dict(current_state)
+    best_score = current_score
+    best_metrics = dict(current_metrics)
+
+    # 単純な焼きなましで向きを探索
+    total_steps = max(200, int(max_iterations))
+    temp_start = 3.0
+    temp_end = 0.02
+
+    for step in range(total_steps):
+        key = free_edges[rng.randrange(len(free_edges))]
+        current_state[key] *= -1
+        cand_score, cand_metrics = score_of(current_state)
+
+        t_ratio = step / max(1, total_steps - 1)
+        temp = temp_start * ((temp_end / temp_start) ** t_ratio)
+        accept = False
+        if cand_score <= current_score:
+            accept = True
+        else:
+            prob = math.exp(-(cand_score - current_score) / max(temp, 1e-9))
+            if rng.random() < prob:
+                accept = True
+
+        if accept:
+            current_score = cand_score
+            current_metrics = cand_metrics
+            if cand_score < best_score:
+                best_score = cand_score
+                best_state = dict(current_state)
+                best_metrics = dict(cand_metrics)
+        else:
+            current_state[key] *= -1
+
+    best_orient = merged_orientation(best_state)
+    directed_edges = []
+    for a, b in undirected_edges:
+        sign = best_orient[(a, b)]
+        if sign == 1:
+            directed_edges.append({"source": a, "target": b})
+        else:
+            directed_edges.append({"source": b, "target": a})
+
+    return {
+        "directed_edges": directed_edges,
+        "fixed_edge_count": len(fixed_map),
+        "optimized_edge_count": len(free_edges),
+        "metrics": best_metrics,
+    }
+
+
+def _evaluate_orientation_metrics(num_vertices: int, undirected_edges: list, orientation: dict) -> dict:
+    DG = nx.DiGraph()
+    DG.add_nodes_from(range(num_vertices))
+    for a, b in undirected_edges:
+        sign = orientation[(a, b)]
+        if sign == 1:
+            DG.add_edge(a, b)
+        else:
+            DG.add_edge(b, a)
+
+    pair_total = num_vertices * (num_vertices - 1)
+    if pair_total == 0:
+        return {
+            "average_distance": 0.0,
+            "unreachable_pairs": 0,
+            "load_square_sum": 0.0,
+            "max_load": 0.0,
+        }
+
+    # 辺負荷は無向キーで集計
+    load = {(a, b): 0 for a, b in undirected_edges}
+    distance_sum = 0.0
+    unreachable = 0
+    reachable = 0
+
+    for s in range(num_vertices):
+        lengths, paths = nx.single_source_dijkstra(DG, s)
+        for t in range(num_vertices):
+            if s == t:
+                continue
+            if t not in lengths:
+                unreachable += 1
+                continue
+            reachable += 1
+            distance_sum += float(lengths[t])
+            path = paths[t]
+            for i in range(len(path) - 1):
+                u = path[i]
+                v = path[i + 1]
+                key = (min(u, v), max(u, v))
+                if key in load:
+                    load[key] += 1
+
+    avg_dist = distance_sum / reachable if reachable > 0 else float(num_vertices * 10)
+    load_values = list(load.values())
+    load_square_sum = float(sum(v * v for v in load_values))
+    max_load = float(max(load_values)) if load_values else 0.0
+
+    return {
+        "average_distance": avg_dist,
+        "unreachable_pairs": int(unreachable),
+        "load_square_sum": load_square_sum,
+        "max_load": max_load,
+    }
+
+
 _SAVED_DIR = os.path.join(os.path.dirname(__file__), "saved")
 
 

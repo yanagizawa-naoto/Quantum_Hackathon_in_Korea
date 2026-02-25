@@ -99,6 +99,7 @@
             </select>
         </div>
         <button id="orient-btn" onclick="showOrientation()">向き表示</button>
+        <button id="optimize-btn" onclick="optimizeInternalOrientation()">内部向き最適化</button>
     </div>
     <div id="info" class="info"></div>
     <div id="error" class="error"></div>
@@ -118,6 +119,7 @@
         let latestFacesAll = null;
         let latestInternalFaceIds = null;
         let regionBoundaryArrows = null;
+        let optimizedInternalArrows = null;
         const DEFAULT_EDGE_COLOR = '#999';
 
         async function generate() {
@@ -236,6 +238,7 @@
             latestFacesAll = null;
             latestInternalFaceIds = null;
             regionBoundaryArrows = null;
+            optimizedInternalArrows = null;
             data.edges.forEach((e, i) => {
                 const a = Math.min(e.source, e.target);
                 const b = Math.max(e.source, e.target);
@@ -302,6 +305,7 @@
                 latestInternalFaceIds = internalFaceIds;
                 showOrientationArrows = false;
                 regionBoundaryArrows = null;
+                optimizedInternalArrows = null;
                 infoDiv.textContent = `領域数: ${k} / 面数: ${faces.length}（外面除外）`;
                 network.redraw();
             } catch (e) {
@@ -428,6 +432,18 @@
                 const p1 = positions[e.to];
                 if (!p0 || !p1) continue;
                 drawArrow(ctx, p0, p1, 18, 7);
+            }
+            ctx.restore();
+            if (!optimizedInternalArrows || optimizedInternalArrows.length === 0) return;
+            ctx.save();
+            ctx.lineWidth = 2.4;
+            ctx.strokeStyle = '#d93025';
+            ctx.fillStyle = '#d93025';
+            for (const e of optimizedInternalArrows) {
+                const p0 = positions[e.from];
+                const p1 = positions[e.to];
+                if (!p0 || !p1) continue;
+                drawArrow(ctx, p0, p1, 22, 9);
             }
             ctx.restore();
         }
@@ -884,6 +900,7 @@
                 orientedFaces = data.oriented_faces || null;
                 orientedOuterIdx = data.outer_face_index;
                 showOrientationArrows = true;
+                optimizedInternalArrows = null;
                 regionBoundaryArrows = buildRegionBoundaryArrows(
                     data.oriented_faces || data.faces || [],
                     data.outer_face_index,
@@ -891,6 +908,89 @@
                     isNaN(seedFace) ? null : seedFace
                 );
                 infoDiv.textContent = `向きを表示しました（基準領域: ${isNaN(seedFace) ? '-' : seedFace} / ${orientation}）`;
+                network.redraw();
+            } catch (e) {
+                errorDiv.textContent = e.message;
+            }
+        }
+
+        function getUniqueBoundaryOrientedEdges(boundaryArrows) {
+            const map = new Map();
+            for (const e of (boundaryArrows || [])) {
+                const a = Math.min(e.from, e.to);
+                const b = Math.max(e.from, e.to);
+                const key = `${a}-${b}`;
+                const sign = (e.from === a && e.to === b) ? 1 : -1;
+                if (!map.has(key)) {
+                    map.set(key, sign);
+                    continue;
+                }
+                if (map.get(key) !== sign) {
+                    throw new Error(`境界辺の向きが矛盾しています: ${key}`);
+                }
+            }
+            const fixed = [];
+            map.forEach((sign, key) => {
+                const [aStr, bStr] = key.split('-');
+                const a = parseInt(aStr, 10);
+                const b = parseInt(bStr, 10);
+                if (sign === 1) {
+                    fixed.push({ source: a, target: b });
+                } else {
+                    fixed.push({ source: b, target: a });
+                }
+            });
+            return fixed;
+        }
+
+        async function optimizeInternalOrientation() {
+            const errorDiv = document.getElementById('error');
+            const infoDiv = document.getElementById('info');
+            errorDiv.textContent = '';
+            if (!currentGraph) {
+                errorDiv.textContent = '先にグラフを生成してください';
+                return;
+            }
+            if (!regionBoundaryArrows || regionBoundaryArrows.length === 0) {
+                errorDiv.textContent = '先に向き表示を実行してください';
+                return;
+            }
+
+            try {
+                const fixedEdges = getUniqueBoundaryOrientedEdges(regionBoundaryArrows);
+                const res = await fetch('/graph/optimize-orientation', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        num_vertices: currentGraph.num_vertices,
+                        edges: currentGraph.edges,
+                        fixed_edges: fixedEdges,
+                        max_iterations: 1600,
+                    }),
+                });
+
+                if (!res.ok) {
+                    const data = await res.json();
+                    throw new Error(data.detail || 'API error');
+                }
+                const data = await res.json();
+
+                const fixedKey = new Set(
+                    fixedEdges.map(e => `${Math.min(e.source, e.target)}-${Math.max(e.source, e.target)}`)
+                );
+                optimizedInternalArrows = (data.directed_edges || []).filter(e => {
+                    const key = `${Math.min(e.source, e.target)}-${Math.max(e.source, e.target)}`;
+                    return !fixedKey.has(key);
+                }).map(e => ({ from: e.source, to: e.target }));
+
+                const m = data.metrics || {};
+                infoDiv.textContent = [
+                    `内部向きを最適化しました(赤矢印: ${optimizedInternalArrows.length}本)`,
+                    `平均距離=${(m.average_distance ?? 0).toFixed(2)}`,
+                    `到達不能=${m.unreachable_pairs ?? 0}`,
+                    `負荷二乗和=${(m.load_square_sum ?? 0).toFixed(1)}`,
+                    `最大負荷=${(m.max_load ?? 0).toFixed(1)}`,
+                ].join(' / ');
                 network.redraw();
             } catch (e) {
                 errorDiv.textContent = e.message;
