@@ -312,7 +312,13 @@ def generate_connected_graph(
     }
 
 
-def compute_planar_faces(num_vertices: int, edges: list, positions: dict) -> dict:
+def compute_planar_faces(
+    num_vertices: int,
+    edges: list,
+    positions: dict,
+    seed_face_index: Optional[int] = None,
+    seed_orientation: Optional[str] = None,
+) -> dict:
     """平面埋め込みの面（閉領域）を列挙して返す。
 
     positions は outer face を判定するために使用する。
@@ -365,7 +371,95 @@ def compute_planar_faces(num_vertices: int, edges: list, positions: dict) -> dic
     areas = [abs(polygon_area(face)) for face in faces]
     outer_idx = int(np.argmax(areas)) if areas else None
 
-    return {"faces": faces, "outer_face_index": outer_idx}
+    # Face orientation propagation
+    def face_area_signed(face_nodes):
+        area = 0.0
+        for i in range(len(face_nodes)):
+            a = get_pos(face_nodes[i])
+            b = get_pos(face_nodes[(i + 1) % len(face_nodes)])
+            area += a["x"] * b["y"] - b["x"] * a["y"]
+        return area * 0.5
+
+    def is_cw(face_nodes):
+        return face_area_signed(face_nodes) < 0
+
+    def dir_in_face(face_nodes, u, v):
+        for i in range(len(face_nodes)):
+            a = face_nodes[i]
+            b = face_nodes[(i + 1) % len(face_nodes)]
+            if a == u and b == v:
+                return 1
+            if a == v and b == u:
+                return -1
+        return 0
+
+    oriented_faces = [list(face) for face in faces]
+    orientations = [None for _ in faces]
+
+    if faces:
+        # Build adjacency via shared edges
+        edge_to_faces = {}
+        for i, face in enumerate(faces):
+            for j in range(len(face)):
+                a = face[j]
+                b = face[(j + 1) % len(face)]
+                key = (min(a, b), max(a, b))
+                edge_to_faces.setdefault(key, []).append(i)
+
+        adj = [[] for _ in faces]
+        for (u, v), flist in edge_to_faces.items():
+            if len(flist) < 2:
+                continue
+            for i in range(len(flist)):
+                for j in range(i + 1, len(flist)):
+                    adj[flist[i]].append((flist[j], u, v))
+                    adj[flist[j]].append((flist[i], u, v))
+
+        orientation_flag = [None for _ in faces]  # 1: as-is, -1: reversed
+
+        # Choose seed (outer face by default) and propagate alternation
+        if seed_face_index is None or not (0 <= seed_face_index < len(faces)):
+            seed_face_index = outer_idx if outer_idx is not None else 0
+
+        desired = seed_orientation.lower() if seed_orientation else "cw"
+        seed_is_cw = is_cw(faces[seed_face_index])
+        if desired == "cw":
+            orientation_flag[seed_face_index] = 1 if seed_is_cw else -1
+        elif desired == "ccw":
+            orientation_flag[seed_face_index] = 1 if not seed_is_cw else -1
+        else:
+            orientation_flag[seed_face_index] = 1
+
+        queue = [seed_face_index]
+        while queue:
+            f = queue.pop(0)
+            for nb, u, v in adj[f]:
+                if orientation_flag[nb] is not None:
+                    continue
+                d_f = dir_in_face(faces[f], u, v)
+                d_nb = dir_in_face(faces[nb], u, v)
+                if d_f == 0 or d_nb == 0:
+                    continue
+                same_dir = d_f == d_nb
+                orientation_flag[nb] = -orientation_flag[f] if same_dir else orientation_flag[f]
+                queue.append(nb)
+
+        # Fill any unassigned with their current orientation
+        for i in range(len(faces)):
+            if orientation_flag[i] is None:
+                orientation_flag[i] = 1
+
+        for i in range(len(faces)):
+            if orientation_flag[i] == -1:
+                oriented_faces[i] = list(reversed(oriented_faces[i]))
+            orientations[i] = "cw" if is_cw(oriented_faces[i]) else "ccw"
+
+    return {
+        "faces": faces,
+        "outer_face_index": outer_idx,
+        "oriented_faces": oriented_faces,
+        "orientations": orientations,
+    }
 
 
 _SAVED_DIR = os.path.join(os.path.dirname(__file__), "saved")

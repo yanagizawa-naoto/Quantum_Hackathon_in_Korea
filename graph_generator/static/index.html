@@ -86,6 +86,20 @@
         <button id="load-btn" onclick="loadGraph()">読み込み</button>
         <button id="refresh-btn" onclick="refreshSavedList()">一覧更新</button>
     </div>
+    <div class="controls">
+        <div class="field">
+            <label for="seed-face">基準領域Index</label>
+            <input type="number" id="seed-face" min="0" placeholder="0">
+        </div>
+        <div class="field">
+            <label for="seed-orientation">向き</label>
+            <select id="seed-orientation">
+                <option value="cw">CW</option>
+                <option value="ccw">CCW</option>
+            </select>
+        </div>
+        <button id="orient-btn" onclick="showOrientation()">向き表示</button>
+    </div>
     <div id="info" class="info"></div>
     <div id="error" class="error"></div>
     <div id="graph-container"></div>
@@ -97,6 +111,13 @@
         let edgeKeyToId = new Map();
         let facePolygons = null;
         let faceColors = null;
+        let orientedFaces = null;
+        let orientedOuterIdx = null;
+        let showOrientationArrows = false;
+        let currentFaceRegions = null;
+        let latestFacesAll = null;
+        let latestInternalFaceIds = null;
+        let regionBoundaryArrows = null;
         const DEFAULT_EDGE_COLOR = '#999';
 
         async function generate() {
@@ -208,13 +229,20 @@
             edgeKeyToId = new Map();
             facePolygons = null;
             faceColors = null;
+            orientedFaces = null;
+            orientedOuterIdx = null;
+            showOrientationArrows = false;
+            currentFaceRegions = null;
+            latestFacesAll = null;
+            latestInternalFaceIds = null;
+            regionBoundaryArrows = null;
             data.edges.forEach((e, i) => {
                 const a = Math.min(e.source, e.target);
                 const b = Math.max(e.source, e.target);
                 edgeKeyToId.set(`${a}-${b}`, i);
             });
 
-            network.on('beforeDrawing', drawFaces);
+            network.on('beforeDrawing', drawFacesAndOrientation);
             network.on('dragEnd', syncPositionsFromNetwork);
         }
 
@@ -247,8 +275,12 @@
                 const facesAll = data.faces || [];
                 const outerIdx = data.outer_face_index;
                 let faces = facesAll;
+                const internalFaceIds = [];
                 if (outerIdx !== null && outerIdx !== undefined) {
                     faces = facesAll.filter((_, i) => i !== outerIdx);
+                }
+                for (let i = 0; i < facesAll.length; i++) {
+                    if (i !== outerIdx) internalFaceIds.push(i);
                 }
 
                 if (faces.length === 0) {
@@ -265,6 +297,11 @@
                 const k = assignment.regionCount;
                 const regionColors = Array.from({ length: k }, (_, i) => randomPastel(i + 1));
                 faceColors = assignment.regions.map(regionId => regionColors[regionId]);
+                currentFaceRegions = assignment.regions;
+                latestFacesAll = facesAll;
+                latestInternalFaceIds = internalFaceIds;
+                showOrientationArrows = false;
+                regionBoundaryArrows = null;
                 infoDiv.textContent = `領域数: ${k} / 面数: ${faces.length}（外面除外）`;
                 network.redraw();
             } catch (e) {
@@ -376,6 +413,50 @@
                 ctx.fill();
             }
             ctx.restore();
+        }
+
+        function drawFacesAndOrientation(ctx) {
+            drawFaces(ctx);
+            if (!showOrientationArrows || !regionBoundaryArrows || !network) return;
+            const positions = network.getPositions();
+            ctx.save();
+            ctx.lineWidth = 2.0;
+            ctx.strokeStyle = '#333';
+            ctx.fillStyle = '#333';
+            for (const e of regionBoundaryArrows) {
+                const p0 = positions[e.from];
+                const p1 = positions[e.to];
+                if (!p0 || !p1) continue;
+                drawArrow(ctx, p0, p1, 18, 7);
+            }
+            ctx.restore();
+        }
+
+        function drawArrow(ctx, from, to, length, headSize) {
+            const dx = to.x - from.x;
+            const dy = to.y - from.y;
+            const d = Math.hypot(dx, dy);
+            if (d < 1e-6) return;
+            const ux = dx / d;
+            const uy = dy / d;
+            const mx = (from.x + to.x) / 2;
+            const my = (from.y + to.y) / 2;
+            const ex = mx + ux * length;
+            const ey = my + uy * length;
+            ctx.beginPath();
+            ctx.moveTo(mx, my);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+            const hx = ex - ux * headSize;
+            const hy = ey - uy * headSize;
+            const px = -uy * headSize * 0.7;
+            const py = ux * headSize * 0.7;
+            ctx.beginPath();
+            ctx.moveTo(ex, ey);
+            ctx.lineTo(hx + px, hy + py);
+            ctx.lineTo(hx - px, hy - py);
+            ctx.closePath();
+            ctx.fill();
         }
 
         function randomPastel(seed) {
@@ -758,6 +839,199 @@
                 area += a.x * b.y - b.x * a.y;
             }
             return area * 0.5;
+        }
+
+        async function showOrientation() {
+            const errorDiv = document.getElementById('error');
+            const infoDiv = document.getElementById('info');
+            errorDiv.textContent = '';
+            if (!currentGraph) {
+                errorDiv.textContent = '先にグラフを生成してください';
+                return;
+            }
+            if (!currentFaceRegions || !latestFacesAll) {
+                errorDiv.textContent = '先に閉領域分割を実行してください';
+                return;
+            }
+            const seedFace = parseInt(document.getElementById('seed-face').value);
+            const orientation = document.getElementById('seed-orientation').value;
+            let seedFaceIndex = null;
+            if (!isNaN(seedFace) && currentFaceRegions && latestInternalFaceIds) {
+                const localIdx = currentFaceRegions.findIndex(r => r === seedFace);
+                if (localIdx !== -1) {
+                    seedFaceIndex = latestInternalFaceIds[localIdx];
+                }
+            }
+            try {
+                const res = await fetch('/graph/faces', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        num_vertices: currentGraph.num_vertices,
+                        edges: currentGraph.edges,
+                        positions: currentGraph.positions,
+                        seed_face_index: seedFaceIndex,
+                        seed_orientation: orientation,
+                    }),
+                });
+
+                if (!res.ok) {
+                    const data = await res.json();
+                    throw new Error(data.detail || 'API error');
+                }
+
+                const data = await res.json();
+                orientedFaces = data.oriented_faces || null;
+                orientedOuterIdx = data.outer_face_index;
+                showOrientationArrows = true;
+                regionBoundaryArrows = buildRegionBoundaryArrows(
+                    data.oriented_faces || data.faces || [],
+                    data.outer_face_index,
+                    currentFaceRegions,
+                    isNaN(seedFace) ? null : seedFace
+                );
+                infoDiv.textContent = `向きを表示しました（基準領域: ${isNaN(seedFace) ? '-' : seedFace} / ${orientation}）`;
+                network.redraw();
+            } catch (e) {
+                errorDiv.textContent = e.message;
+            }
+        }
+
+        function buildRegionBoundaryArrows(orientedFacesAll, outerIdx, regions, seedRegion) {
+            if (!orientedFacesAll || regions == null) return [];
+            const internalFaceIds = [];
+            for (let i = 0; i < orientedFacesAll.length; i++) {
+                if (i !== outerIdx) internalFaceIds.push(i);
+            }
+            if (internalFaceIds.length !== regions.length) return [];
+
+            const orientedInternal = internalFaceIds.map(id => orientedFacesAll[id]);
+            const edgeToFaces = new Map();
+            for (let i = 0; i < orientedInternal.length; i++) {
+                const face = orientedInternal[i];
+                for (let j = 0; j < face.length; j++) {
+                    const a = face[j];
+                    const b = face[(j + 1) % face.length];
+                    const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+                    if (!edgeToFaces.has(key)) edgeToFaces.set(key, []);
+                    edgeToFaces.get(key).push(i);
+                }
+            }
+
+            const boundaryByRegion = new Map();
+            for (let i = 0; i < orientedInternal.length; i++) {
+                const face = orientedInternal[i];
+                const r = regions[i];
+                if (!boundaryByRegion.has(r)) boundaryByRegion.set(r, []);
+                for (let j = 0; j < face.length; j++) {
+                    const a = face[j];
+                    const b = face[(j + 1) % face.length];
+                    const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+                    const neigh = edgeToFaces.get(key) || [];
+                    let boundary = true;
+                    if (neigh.length === 2) {
+                        const other = neigh[0] === i ? neigh[1] : neigh[0];
+                        if (regions[other] === r) boundary = false;
+                    }
+                    if (boundary) boundaryByRegion.get(r).push({ from: a, to: b, key });
+                }
+            }
+
+            // Reconstruct one-stroke boundary cycle(s) per region.
+            let arrows = [];
+            boundaryByRegion.forEach((edges, r) => {
+                if (edges.length === 0) return;
+                const outByNode = new Map();
+                edges.forEach(e => {
+                    if (!outByNode.has(e.from)) outByNode.set(e.from, []);
+                    outByNode.get(e.from).push(e);
+                });
+
+                const used = new Set();
+                for (const e0 of edges) {
+                    if (used.has(e0.key + "|" + e0.from + ">" + e0.to)) continue;
+                    let cur = e0;
+                    let guard = 0;
+                    while (cur && guard < edges.length + 5) {
+                        const mark = cur.key + "|" + cur.from + ">" + cur.to;
+                        if (used.has(mark)) break;
+                        used.add(mark);
+                        arrows.push({ from: cur.from, to: cur.to, region: r, key: cur.key });
+                        const nextList = outByNode.get(cur.to) || [];
+                        let next = null;
+                        for (const cand of nextList) {
+                            const candMark = cand.key + "|" + cand.from + ">" + cand.to;
+                            if (!used.has(candMark)) {
+                                next = cand;
+                                break;
+                            }
+                        }
+                        cur = next;
+                        guard += 1;
+                    }
+                }
+            });
+
+            // Align region orientations so shared boundaries point in the same direction.
+            const regionsList = Array.from(boundaryByRegion.keys());
+            const regionSet = new Set(regionsList);
+            const root = regionSet.has(seedRegion) ? seedRegion : regionsList[0];
+            const flip = new Map(); // 1 keep, -1 reverse
+            const adj = new Map();
+            regionsList.forEach(r => adj.set(r, []));
+
+            const edgeByRegion = new Map();
+            regionsList.forEach(r => edgeByRegion.set(r, new Map()));
+            arrows.forEach(a => {
+                const canonicalDir = (a.from < a.to) ? 1 : -1;
+                edgeByRegion.get(a.region).set(a.key, canonicalDir);
+            });
+
+            const keyRegions = new Map();
+            arrows.forEach(a => {
+                if (!keyRegions.has(a.key)) keyRegions.set(a.key, new Set());
+                keyRegions.get(a.key).add(a.region);
+            });
+            keyRegions.forEach((rs, key) => {
+                const arr = Array.from(rs);
+                for (let i = 0; i < arr.length; i++) {
+                    for (let j = i + 1; j < arr.length; j++) {
+                        const r1 = arr[i];
+                        const r2 = arr[j];
+                        const d1 = edgeByRegion.get(r1).get(key);
+                        const d2 = edgeByRegion.get(r2).get(key);
+                        const desired = d1 * d2; // flip[r2] should be flip[r1] * desired
+                        adj.get(r1).push({ nb: r2, desired });
+                        adj.get(r2).push({ nb: r1, desired });
+                    }
+                }
+            });
+
+            if (root !== undefined) {
+                flip.set(root, 1);
+                const q = [root];
+                while (q.length) {
+                    const r = q.shift();
+                    const fr = flip.get(r);
+                    for (const { nb, desired } of (adj.get(r) || [])) {
+                        if (flip.has(nb)) continue;
+                        flip.set(nb, fr * desired);
+                        q.push(nb);
+                    }
+                }
+            }
+            regionsList.forEach(r => {
+                if (!flip.has(r)) flip.set(r, 1);
+            });
+
+            arrows = arrows.map(a => {
+                if (flip.get(a.region) === -1) {
+                    return { ...a, from: a.to, to: a.from };
+                }
+                return a;
+            });
+
+            return arrows;
         }
 
         function syncPositionsFromNetwork() {

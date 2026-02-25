@@ -32,6 +32,8 @@ class FacesRequest(BaseModel):
     num_vertices: int = Field(..., ge=1, description="頂点数")
     edges: list[FaceEdge]
     positions: dict[int, FacePosition]
+    seed_face_index: Optional[int] = Field(None, description="向きを固定する面のindex")
+    seed_orientation: Optional[str] = Field(None, description="cw or ccw")
 
 class SaveGraphRequest(BaseModel):
     name: str = Field(..., min_length=1, description="保存名")
@@ -56,6 +58,8 @@ async def list_faces(request: FacesRequest):
             request.num_vertices,
             [e.model_dump() for e in request.edges],
             {int(k): v.model_dump() for k, v in request.positions.items()},
+            request.seed_face_index,
+            request.seed_orientation,
         )
         return result
     except ValueError as e:
