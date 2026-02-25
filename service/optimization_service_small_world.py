@@ -10,41 +10,60 @@ def _add_d1_path_reward(
     Q: Dict[Tuple[str, str], float], i: int, j: int, edge_to_var: Dict[Tuple[int, int], str]
 ):
     """
-    Adds a reward to the QUBO for a direct path (length 1) between i and j.
+    Adds a reward term to the QUBO for a direct path (length 1) from i to j.
+
+    Uses the unified reward convention: -1 * indicator(i->j exists) is added to Q so
+    that minimising Q maximises the number of reachable ordered pairs.
+
+    For canonical edge (u, v) with u < v, x=0 means u->v and x=1 means v->u.
+    The indicator that i->j exists is (1 - x) when i < j, or x when i > j.
+    Adding -1 * indicator gives:
+        i < j:  -(1 - x) = x - 1  →  +1.0 on the diagonal
+        i > j:  -x               →  -1.0 on the diagonal
+    Both cases apply the same reward convention; the sign differs only because the
+    indicator formula flips depending on whether i->j is the forward or reverse
+    direction of the canonical edge variable.
     """
     edge_ij = tuple(sorted((i, j)))
-    if edge_ij in edge_to_var:
-        var_ij = edge_to_var[edge_ij]
-        if i < j:
-            Q[(var_ij, var_ij)] += 1.0
-        else:
-            Q[(var_ij, var_ij)] -= 1.0
+    if edge_ij not in edge_to_var:
+        return
+    var_ij = edge_to_var[edge_ij]
+    Q[(var_ij, var_ij)] += 1.0 if i < j else -1.0
 
 
 def _add_d2_path_reward(
     Q: Dict[Tuple[str, str], float], i: int, j: int, k: int, edge_to_var: Dict[Tuple[int, int], str]
 ):
     """
-    Adds a reward to the QUBO for a 2-hop path (i -> k -> j).
+    Adds a reward term to the QUBO for a 2-hop path (i -> k -> j).
+
+    Uses the unified reward convention: -1 * indicator(i->k->j exists) is added to Q.
+    The path indicator is indicator_ik * indicator_kj, where each edge indicator is a
+    linear function of its variable: indicator = const + coeff * x.
+
+    Expanding -indicator_ik * indicator_kj yields one quadratic term and two linear
+    (diagonal) correction terms, all with consistent negative-reward signs.
     """
     edge_ik = tuple(sorted((i, k)))
     var_ik = edge_to_var[edge_ik]
     coeff_ik = 1.0 if i > k else -1.0
     const_ik = 0.0 if i > k else 1.0
-    
+
     edge_kj = tuple(sorted((k, j)))
     var_kj = edge_to_var[edge_kj]
     coeff_kj = 1.0 if k > j else -1.0
     const_kj = 0.0 if k > j else 1.0
-    
-    quad_coeff = - (coeff_ik * coeff_kj)
+
+    # Quadratic term: -coeff_ik * coeff_kj * x_ik * x_kj
+    quad_coeff = -(coeff_ik * coeff_kj)
     if var_ik < var_kj:
         Q[(var_ik, var_kj)] += quad_coeff
     else:
         Q[(var_kj, var_ik)] += quad_coeff
 
-    Q[(var_ik, var_ik)] -= (coeff_ik * const_kj)
-    Q[(var_kj, var_kj)] -= (const_ik * coeff_kj)
+    # Linear correction terms from expanding the product
+    Q[(var_ik, var_ik)] -= coeff_ik * const_kj
+    Q[(var_kj, var_kj)] -= const_ik * coeff_kj
 
 
 # --- Private Helper Functions: Level 1 (Orchestration) ---
