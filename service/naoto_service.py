@@ -4,8 +4,6 @@ from typing import Optional
 
 import networkx as nx
 import numpy as np
-import json
-import os
 
 
 def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
@@ -663,45 +661,3 @@ def _evaluate_orientation_metrics(num_vertices: int, undirected_edges: list, ori
         "load_square_sum": load_square_sum,
         "max_load": max_load,
     }
-
-
-_SAVED_DIR = os.path.join(os.path.dirname(__file__), "saved")
-
-
-def _sanitize_name(name: str) -> str:
-    name = name.strip()
-    if not name:
-        raise ValueError("保存名が空です")
-    safe = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_"))
-    if not safe:
-        raise ValueError("保存名に使える文字がありません")
-    return safe
-
-
-def save_graph_json(name: str, data: dict) -> dict:
-    os.makedirs(_SAVED_DIR, exist_ok=True)
-    safe = _sanitize_name(name)
-    path = os.path.join(_SAVED_DIR, f"{safe}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return {"name": safe, "path": f"{safe}.json"}
-
-
-def list_saved_graphs() -> list:
-    if not os.path.isdir(_SAVED_DIR):
-        return []
-    files = []
-    for fn in os.listdir(_SAVED_DIR):
-        if fn.endswith(".json"):
-            files.append(fn[:-5])
-    files.sort()
-    return files
-
-
-def load_graph_json(name: str) -> dict:
-    safe = _sanitize_name(name)
-    path = os.path.join(_SAVED_DIR, f"{safe}.json")
-    if not os.path.isfile(path):
-        raise ValueError("保存されたグラフが見つかりません")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
