@@ -984,10 +984,13 @@
                 }).map(e => ({ from: e.source, to: e.target }));
 
                 const m = data.metrics || {};
+                const uvCount = m.unreachable_vertex_count ?? 0;
+                const uvList = m.unreachable_vertices || [];
                 infoDiv.textContent = [
                     `内部向きを最適化しました(赤矢印: ${optimizedInternalArrows.length}本)`,
                     `平均距離=${(m.average_distance ?? 0).toFixed(2)}`,
                     `到達不能=${m.unreachable_pairs ?? 0}`,
+                    `到達不能頂点=${uvCount}${uvCount > 0 ? `(${uvList.join(',')})` : ''}`,
                     `負荷二乗和=${(m.load_square_sum ?? 0).toFixed(1)}`,
                     `最大負荷=${(m.max_load ?? 0).toFixed(1)}`,
                 ].join(' / ');

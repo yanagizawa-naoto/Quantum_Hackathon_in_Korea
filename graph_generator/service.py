@@ -547,10 +547,9 @@ def optimize_edge_orientations(
     def score_of(state):
         orient = merged_orientation(state)
         metrics = _evaluate_orientation_metrics(n, undirected_edges, orient)
-        # 到達不能を最優先
+        # 到達不能はペナルティに使わず、事後レポートのみ行う
         score = (
-            metrics["unreachable_pairs"] * 10000.0
-            + metrics["average_distance"] * 1.0
+            metrics["average_distance"] * 1.0
             + metrics["load_square_sum"] * 0.06
             + metrics["max_load"] * 0.8
         )
@@ -633,6 +632,7 @@ def _evaluate_orientation_metrics(num_vertices: int, undirected_edges: list, ori
     distance_sum = 0.0
     unreachable = 0
     reachable = 0
+    unreachable_by_source = [0 for _ in range(num_vertices)]
 
     for s in range(num_vertices):
         lengths, paths = nx.single_source_dijkstra(DG, s)
@@ -641,6 +641,7 @@ def _evaluate_orientation_metrics(num_vertices: int, undirected_edges: list, ori
                 continue
             if t not in lengths:
                 unreachable += 1
+                unreachable_by_source[s] += 1
                 continue
             reachable += 1
             distance_sum += float(lengths[t])
@@ -660,6 +661,8 @@ def _evaluate_orientation_metrics(num_vertices: int, undirected_edges: list, ori
     return {
         "average_distance": avg_dist,
         "unreachable_pairs": int(unreachable),
+        "unreachable_vertices": [i for i, c in enumerate(unreachable_by_source) if c > 0],
+        "unreachable_vertex_count": int(sum(1 for c in unreachable_by_source if c > 0)),
         "load_square_sum": load_square_sum,
         "max_load": max_load,
     }
