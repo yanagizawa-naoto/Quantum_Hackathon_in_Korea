@@ -7,6 +7,11 @@ import numpy as np
 import json
 import os
 
+try:
+    from dwave.samplers import SimulatedAnnealingSampler
+except Exception:  # pragma: no cover
+    SimulatedAnnealingSampler = None
+
 
 def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
     """planar_layout を正方形に引き伸ばし、4種の力で最適化する（交差0保証）。"""
@@ -469,14 +474,7 @@ def optimize_edge_orientations(
     max_iterations: int = 1200,
     random_seed: Optional[int] = None,
 ) -> dict:
-    """辺向きを最適化して、混雑集中を抑えた有向化を返す。
-
-    目的:
-    - 到達不能ペア数を最小化（最優先）
-    - 平均最短距離を短くする
-    - 辺利用集中（二乗和）を抑える
-    - 最大ボトルネックを抑える
-    """
+    """QUBO近似で辺向きを最適化して、混雑集中を抑えた有向化を返す。"""
     n = int(num_vertices)
     if n < 2:
         raise ValueError("頂点数は2以上が必要です")
@@ -516,82 +514,176 @@ def optimize_edge_orientations(
             raise ValueError("固定辺の向きに矛盾があります")
         fixed_map[key] = sign
 
-    free_edges = [e for e in undirected_edges if e not in fixed_map]
-    if not free_edges:
-        directed_edges = []
-        for a, b in undirected_edges:
-            sign = fixed_map[(a, b)]
-            if sign == 1:
-                directed_edges.append({"source": a, "target": b})
+    UG = nx.Graph()
+    UG.add_nodes_from(range(n))
+    UG.add_edges_from(undirected_edges)
+
+    all_od = [(s, t) for s in range(n) for t in range(n) if s != t]
+    max_od_pairs = min(len(all_od), max(60, n * 6))
+    if len(all_od) > max_od_pairs:
+        od_pairs = rng.sample(all_od, max_od_pairs)
+    else:
+        od_pairs = all_od
+
+    # 1) 各ODで候補経路を作る（上位K本）
+    k_paths = 3
+    path_pool = []
+    for s, t in od_pairs:
+        candidates = []
+        try:
+            gen = nx.shortest_simple_paths(UG, s, t)
+            for _ in range(k_paths):
+                p = next(gen)
+                candidates.append(p)
+        except (nx.NetworkXNoPath, StopIteration):
+            continue
+        if not candidates:
+            continue
+        path_pool.append({"od": (s, t), "paths": candidates})
+
+    if not path_pool:
+        raise ValueError("候補経路を作成できませんでした")
+
+    # 2) QUBOを構築: 1変数=ODの候補経路選択
+    #    E = A*one-hot + B*length + C*congestion^2 + D*fixed方向違反
+    A = 30.0
+    B = 1.0
+    C = 0.12
+    D = 40.0
+
+    var_meta = []  # {"k": od_index, "p": path_index, "path": [...]}
+    od_to_vars = [[] for _ in range(len(path_pool))]
+    edge_to_vars = {e: [] for e in undirected_edges}
+
+    for k_idx, bundle in enumerate(path_pool):
+        for p_idx, path in enumerate(bundle["paths"]):
+            v_idx = len(var_meta)
+            var_meta.append({"k": k_idx, "p": p_idx, "path": path})
+            od_to_vars[k_idx].append(v_idx)
+            for i in range(len(path) - 1):
+                key = (min(path[i], path[i + 1]), max(path[i], path[i + 1]))
+                if key in edge_to_vars:
+                    edge_to_vars[key].append(v_idx)
+
+    m = len(var_meta)
+    linear = [0.0 for _ in range(m)]
+    quad = {}
+
+    def add_quad(i, j, c):
+        if i == j:
+            linear[i] += c
+            return
+        a, b = (i, j) if i < j else (j, i)
+        quad[(a, b)] = quad.get((a, b), 0.0) + c
+
+    # one-hot penalty
+    for vars_k in od_to_vars:
+        for i in vars_k:
+            linear[i] += -A
+        for i in range(len(vars_k)):
+            for j in range(i + 1, len(vars_k)):
+                add_quad(vars_k[i], vars_k[j], 2.0 * A)
+
+    # path length term + fixed方向違反
+    for i, meta in enumerate(var_meta):
+        path = meta["path"]
+        linear[i] += B * float(len(path) - 1)
+        mismatch = 0
+        for idx in range(len(path) - 1):
+            u = path[idx]
+            v = path[idx + 1]
+            key = (min(u, v), max(u, v))
+            if key not in fixed_map:
+                continue
+            sign = 1 if (u == key[0] and v == key[1]) else -1
+            if sign != fixed_map[key]:
+                mismatch += 1
+        if mismatch > 0:
+            linear[i] += D * float(mismatch)
+
+    # congestion square term
+    for key, vars_e in edge_to_vars.items():
+        for i in vars_e:
+            linear[i] += C
+        for i in range(len(vars_e)):
+            vi = vars_e[i]
+            for j in range(i + 1, len(vars_e)):
+                vj = vars_e[j]
+                add_quad(vi, vj, 2.0 * C)
+
+    # 3) QUBOを解く（D-Wave SimulatedAnnealingSampler）
+    def energy(x):
+        e = 0.0
+        for i in range(m):
+            if x[i]:
+                e += linear[i]
+        for (i, j), c in quad.items():
+            if x[i] and x[j]:
+                e += c
+        return e
+
+    if SimulatedAnnealingSampler is None:
+        raise ValueError("dwave.samplers が見つかりません。.venv に dwave-samplers をインストールしてください")
+
+    qubo = {}
+    for i, c in enumerate(linear):
+        if abs(c) > 1e-12:
+            qubo[(i, i)] = c
+    for (i, j), c in quad.items():
+        if abs(c) > 1e-12:
+            qubo[(i, j)] = c
+
+    sampler = SimulatedAnnealingSampler()
+    num_reads = max(30, min(300, int(max_iterations // 4)))
+    sampleset = sampler.sample_qubo(qubo, num_reads=num_reads)
+    raw = sampleset.first.sample
+    best_state = [1 if raw.get(i, 0) else 0 for i in range(m)]
+
+    # one-hot違反を局所修復
+    for vars_k in od_to_vars:
+        chosen = [i for i in vars_k if best_state[i] == 1]
+        if len(chosen) == 1:
+            continue
+        best_i = vars_k[0]
+        best_e_local = None
+        for cand in vars_k:
+            prev = [best_state[i] for i in vars_k]
+            for i in vars_k:
+                best_state[i] = 1 if i == cand else 0
+            e_val = energy(best_state)
+            if best_e_local is None or e_val < best_e_local:
+                best_e_local = e_val
+                best_i = cand
+            for idx, i in enumerate(vars_k):
+                best_state[i] = prev[idx]
+        for i in vars_k:
+            best_state[i] = 1 if i == best_i else 0
+
+    best_e = energy(best_state)
+
+    # 4) 選択経路から辺向きを決める（固定辺優先、残りは通過向き多数決）
+    flow_sign_sum = {e: 0 for e in undirected_edges}
+    for i, meta in enumerate(var_meta):
+        if best_state[i] != 1:
+            continue
+        path = meta["path"]
+        for idx in range(len(path) - 1):
+            u = path[idx]
+            v = path[idx + 1]
+            key = (min(u, v), max(u, v))
+            flow_sign_sum[key] += 1 if (u == key[0] and v == key[1]) else -1
+
+    best_orient = {}
+    for key in undirected_edges:
+        if key in fixed_map:
+            best_orient[key] = fixed_map[key]
+        else:
+            ssum = flow_sign_sum.get(key, 0)
+            if ssum == 0:
+                best_orient[key] = 1 if rng.random() < 0.5 else -1
             else:
-                directed_edges.append({"source": b, "target": a})
-        metrics = _evaluate_orientation_metrics(n, undirected_edges, fixed_map)
-        return {
-            "directed_edges": directed_edges,
-            "fixed_edge_count": len(fixed_map),
-            "optimized_edge_count": 0,
-            "metrics": metrics,
-        }
+                best_orient[key] = 1 if ssum > 0 else -1
 
-    def random_state():
-        state = {}
-        for key in free_edges:
-            state[key] = 1 if rng.random() < 0.5 else -1
-        return state
-
-    def merged_orientation(state):
-        orient = dict(fixed_map)
-        orient.update(state)
-        return orient
-
-    def score_of(state):
-        orient = merged_orientation(state)
-        metrics = _evaluate_orientation_metrics(n, undirected_edges, orient)
-        # 到達不能はペナルティに使わず、事後レポートのみ行う
-        score = (
-            metrics["average_distance"] * 1.0
-            + metrics["load_square_sum"] * 0.06
-            + metrics["max_load"] * 0.8
-        )
-        return score, metrics
-
-    current_state = random_state()
-    current_score, current_metrics = score_of(current_state)
-    best_state = dict(current_state)
-    best_score = current_score
-    best_metrics = dict(current_metrics)
-
-    # 単純な焼きなましで向きを探索
-    total_steps = max(200, int(max_iterations))
-    temp_start = 3.0
-    temp_end = 0.02
-
-    for step in range(total_steps):
-        key = free_edges[rng.randrange(len(free_edges))]
-        current_state[key] *= -1
-        cand_score, cand_metrics = score_of(current_state)
-
-        t_ratio = step / max(1, total_steps - 1)
-        temp = temp_start * ((temp_end / temp_start) ** t_ratio)
-        accept = False
-        if cand_score <= current_score:
-            accept = True
-        else:
-            prob = math.exp(-(cand_score - current_score) / max(temp, 1e-9))
-            if rng.random() < prob:
-                accept = True
-
-        if accept:
-            current_score = cand_score
-            current_metrics = cand_metrics
-            if cand_score < best_score:
-                best_score = cand_score
-                best_state = dict(current_state)
-                best_metrics = dict(cand_metrics)
-        else:
-            current_state[key] *= -1
-
-    best_orient = merged_orientation(best_state)
     directed_edges = []
     for a, b in undirected_edges:
         sign = best_orient[(a, b)]
@@ -600,10 +692,15 @@ def optimize_edge_orientations(
         else:
             directed_edges.append({"source": b, "target": a})
 
+    best_metrics = _evaluate_orientation_metrics(n, undirected_edges, best_orient)
+
     return {
         "directed_edges": directed_edges,
         "fixed_edge_count": len(fixed_map),
-        "optimized_edge_count": len(free_edges),
+        "optimized_edge_count": len([e for e in undirected_edges if e not in fixed_map]),
+        "qubo_variable_count": m,
+        "qubo_od_count": len(path_pool),
+        "qubo_energy": float(best_e),
         "metrics": best_metrics,
     }
 
