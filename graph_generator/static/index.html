@@ -7,103 +7,177 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/vis-network.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
-            color: #333;
-            padding: 20px;
+        :root {
+            --bg: #070b17;
+            --bg-secondary: #0e1424;
+            --bg-tertiary: #162039;
+            --text: #dbe8ff;
+            --text-muted: #8ea4cc;
+            --border: #253458;
+            --border-input: #31466f;
+            --btn-primary-bg: #2e69d1;
+            --btn-primary-hover: #3e7ae4;
+            --btn-secondary-bg: #111b31;
+            --btn-secondary-hover: #1a2847;
+            --card-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
         }
-        h1 { text-align: center; margin-bottom: 20px; }
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 24px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 8px;
+            font-size: 42px;
+            letter-spacing: -0.02em;
+            background: linear-gradient(90deg, #8fb8ff, #c0d6ff, #91ffd8);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .subtitle {
+            text-align: center;
+            color: var(--text-muted);
+            margin-bottom: 18px;
+            font-size: 14px;
+        }
+        .app-shell {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .panel {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px;
+            box-shadow: var(--card-shadow);
+            margin-bottom: 14px;
+        }
         .controls {
             display: flex;
             gap: 12px;
-            justify-content: center;
+            justify-content: flex-start;
             align-items: end;
-            margin-bottom: 20px;
+            margin-bottom: 10px;
             flex-wrap: wrap;
         }
         .field { display: flex; flex-direction: column; gap: 4px; }
-        .field label { font-size: 14px; font-weight: 600; }
-        .field input {
+        .field label { font-size: 13px; font-weight: 600; color: var(--text-muted); }
+        .field input,
+        .field select {
             padding: 8px 12px;
-            border: 1px solid #ccc;
+            border: 1px solid var(--border-input);
             border-radius: 6px;
-            font-size: 16px;
+            font-size: 15px;
             width: 140px;
+            background: #0a1224;
+            color: var(--text);
         }
         button {
             padding: 8px 24px;
-            background: #4a90d9;
+            background: var(--btn-primary-bg);
             color: #fff;
-            border: none;
+            border: 1px solid transparent;
             border-radius: 6px;
-            font-size: 16px;
+            font-size: 15px;
             cursor: pointer;
             height: 38px;
+            box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+            transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
         }
-        button:hover { background: #357abd; }
+        button:hover { background: var(--btn-primary-hover); box-shadow: 0 0 18px rgba(62, 122, 228, 0.24); }
+        button:active { transform: translateY(1px); }
         button:disabled { background: #aaa; cursor: not-allowed; }
+        #refresh-btn,
+        #load-btn,
+        #save-btn {
+            background: var(--btn-secondary-bg);
+            color: var(--text);
+            border-color: var(--border-input);
+        }
+        #refresh-btn:hover,
+        #load-btn:hover,
+        #save-btn:hover {
+            background: var(--btn-secondary-hover);
+        }
         #graph-container {
             width: 100%;
-            height: calc(100vh - 180px);
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 8px;
+            height: calc(100vh - 300px);
+            min-height: 560px;
+            background: radial-gradient(circle at 25% 15%, #17274a 0%, #0c1427 45%, #090f1e 100%);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: var(--card-shadow);
         }
         .info {
             text-align: center;
             margin-bottom: 10px;
             font-size: 14px;
-            color: #666;
+            color: var(--text-muted);
         }
         .error { color: #d9534f; text-align: center; margin-bottom: 10px; }
+        @media (max-width: 900px) {
+            body { padding: 12px; }
+            h1 { font-size: 34px; }
+            #graph-container {
+                height: calc(100vh - 360px);
+                min-height: 500px;
+            }
+        }
     </style>
 </head>
 <body>
-    <h1>Connected Graph Generator</h1>
-    <div class="controls">
-        <div class="field">
-            <label for="vertices">頂点数 (必須)</label>
-            <input type="number" id="vertices" min="3" max="200" value="10">
+    <div class="app-shell">
+        <h1>Connected Graph Generator</h1>
+        <p class="subtitle">Naoto Graph Workflow</p>
+        <div class="panel">
+            <div class="controls">
+                <div class="field">
+                    <label for="vertices">Vertices (required)</label>
+                    <input type="number" id="vertices" min="3" max="200" value="10">
+                </div>
+                <div class="field">
+                    <label for="edges">Edges (blank = random)</label>
+                    <input type="number" id="edges" min="0" placeholder="auto">
+                </div>
+                <button id="generate-btn" onclick="generate()">Generate</button>
+                <button id="split-btn" onclick="splitAll()">Split Regions</button>
+            </div>
+            <div class="controls">
+                <div class="field">
+                    <label for="save-name">Save Name</label>
+                    <input type="text" id="save-name" placeholder="example-graph">
+                </div>
+                <button id="save-btn" onclick="saveGraph()">Save</button>
+                <div class="field">
+                    <label for="load-select">Load</label>
+                    <select id="load-select"></select>
+                </div>
+                <button id="load-btn" onclick="loadGraph()">Load</button>
+                <button id="refresh-btn" onclick="refreshSavedList()">Refresh List</button>
+            </div>
+            <div class="controls">
+                <div class="field">
+                    <label for="seed-face">Seed Region Index</label>
+                    <input type="number" id="seed-face" min="0" placeholder="0">
+                </div>
+                <div class="field">
+                    <label for="seed-orientation">Orientation</label>
+                    <select id="seed-orientation">
+                        <option value="cw">CW</option>
+                        <option value="ccw">CCW</option>
+                    </select>
+                </div>
+                <button id="orient-btn" onclick="showOrientation()">Show Orientation</button>
+                <button id="optimize-btn" onclick="optimizeInternalOrientation()">Optimize Internal Direction</button>
+            </div>
         </div>
-        <div class="field">
-            <label for="edges">エッジ数 (空=ランダム)</label>
-            <input type="number" id="edges" min="0" placeholder="auto">
-        </div>
-        <button id="generate-btn" onclick="generate()">生成</button>
-        <button id="split-btn" onclick="splitAll()">閉領域分割</button>
+        <div id="info" class="info"></div>
+        <div id="error" class="error"></div>
+        <div id="graph-container"></div>
     </div>
-    <div class="controls">
-        <div class="field">
-            <label for="save-name">保存名</label>
-            <input type="text" id="save-name" placeholder="example-graph">
-        </div>
-        <button id="save-btn" onclick="saveGraph()">保存</button>
-        <div class="field">
-            <label for="load-select">読み込み</label>
-            <select id="load-select"></select>
-        </div>
-        <button id="load-btn" onclick="loadGraph()">読み込み</button>
-        <button id="refresh-btn" onclick="refreshSavedList()">一覧更新</button>
-    </div>
-    <div class="controls">
-        <div class="field">
-            <label for="seed-face">基準領域Index</label>
-            <input type="number" id="seed-face" min="0" placeholder="0">
-        </div>
-        <div class="field">
-            <label for="seed-orientation">向き</label>
-            <select id="seed-orientation">
-                <option value="cw">CW</option>
-                <option value="ccw">CCW</option>
-            </select>
-        </div>
-        <button id="orient-btn" onclick="showOrientation()">向き表示</button>
-        <button id="optimize-btn" onclick="optimizeInternalOrientation()">内部向き最適化</button>
-    </div>
-    <div id="info" class="info"></div>
-    <div id="error" class="error"></div>
-    <div id="graph-container"></div>
 
     <script>
         let network = null;
@@ -120,6 +194,7 @@
         let latestInternalFaceIds = null;
         let regionBoundaryArrows = null;
         let optimizedInternalArrows = null;
+        let animationFrameId = null;
         const DEFAULT_EDGE_COLOR = '#999';
 
         async function generate() {
@@ -131,7 +206,7 @@
 
             const numVertices = parseInt(document.getElementById('vertices').value);
             if (isNaN(numVertices) || numVertices < 3) {
-                errorDiv.textContent = '頂点数を3以上の整数で入力してください';
+                errorDiv.textContent = 'Please enter an integer of 3 or greater for vertices';
                 return;
             }
 
@@ -140,13 +215,13 @@
             if (edgesInput !== '') {
                 body.num_edges = parseInt(edgesInput);
                 if (isNaN(body.num_edges) || body.num_edges < 0) {
-                    errorDiv.textContent = 'エッジ数は0以上の整数で入力してください';
+                    errorDiv.textContent = 'Please enter an integer of 0 or greater for edges';
                     return;
                 }
             }
 
             btn.disabled = true;
-            btn.textContent = '生成中...';
+            btn.textContent = 'Generating...';
 
             try {
                 const res = await fetch('/graph/generate', {
@@ -161,14 +236,14 @@
                 }
 
                 const data = await res.json();
-                infoDiv.textContent = `頂点数: ${data.num_vertices} / エッジ数: ${data.num_edges}`;
+                infoDiv.textContent = `Vertices: ${data.num_vertices} / Edges: ${data.num_edges}`;
                 currentGraph = data;
                 renderGraph(data);
             } catch (e) {
                 errorDiv.textContent = e.message;
             } finally {
                 btn.disabled = false;
-                btn.textContent = '生成';
+                btn.textContent = 'Generate';
             }
         }
 
@@ -213,11 +288,11 @@
                 nodes: {
                     shape: 'dot',
                     size: 16,
-                    font: { size: 14 },
-                    color: { background: '#4a90d9', border: '#357abd' },
+                    font: { size: 14, color: '#dbe8ff' },
+                    color: { background: '#5a8fe8', border: '#7fb2ff' },
                 },
                 edges: {
-                    color: { color: '#999' },
+                    color: { color: '#6680a8' },
                     width: 1.5,
                     smooth: false,
                 },
@@ -245,8 +320,10 @@
                 edgeKeyToId.set(`${a}-${b}`, i);
             });
 
-            network.on('beforeDrawing', drawFacesAndOrientation);
+            network.on('beforeDrawing', drawFaces);
+            network.on('afterDrawing', drawOrientationOverlay);
             network.on('dragEnd', syncPositionsFromNetwork);
+            ensureArrowAnimation();
         }
 
         async function splitAll() {
@@ -254,7 +331,7 @@
             const infoDiv = document.getElementById('info');
             errorDiv.textContent = '';
             if (!currentGraph) {
-                errorDiv.textContent = '先にグラフを生成してください';
+                errorDiv.textContent = 'Please generate a graph first';
                 return;
             }
 
@@ -287,7 +364,7 @@
                 }
 
                 if (faces.length === 0) {
-                    errorDiv.textContent = '分割できる面がありません';
+                    errorDiv.textContent = 'No splittable faces were found';
                     return;
                 }
 
@@ -306,7 +383,7 @@
                 showOrientationArrows = false;
                 regionBoundaryArrows = null;
                 optimizedInternalArrows = null;
-                infoDiv.textContent = `領域数: ${k} / 面数: ${faces.length}（外面除外）`;
+                infoDiv.textContent = `Regions: ${k} / Faces: ${faces.length} (outer face excluded)`;
                 network.redraw();
             } catch (e) {
                 errorDiv.textContent = e.message;
@@ -337,12 +414,12 @@
             const infoDiv = document.getElementById('info');
             errorDiv.textContent = '';
             if (!currentGraph) {
-                errorDiv.textContent = '先にグラフを生成してください';
+                errorDiv.textContent = 'Please generate a graph first';
                 return;
             }
             const name = document.getElementById('save-name').value.trim();
             if (!name) {
-                errorDiv.textContent = '保存名を入力してください';
+                errorDiv.textContent = 'Please enter a save name';
                 return;
             }
             try {
@@ -362,7 +439,7 @@
                     throw new Error(data.detail || 'API error');
                 }
                 const data = await res.json();
-                infoDiv.textContent = `保存しました: ${data.name}`;
+                infoDiv.textContent = `Saved: ${data.name}`;
                 await refreshSavedList();
             } catch (e) {
                 errorDiv.textContent = e.message;
@@ -376,7 +453,7 @@
             const select = document.getElementById('load-select');
             const name = select.value;
             if (!name) {
-                errorDiv.textContent = '読み込み対象を選択してください';
+                errorDiv.textContent = 'Please select a graph to load';
                 return;
             }
             try {
@@ -388,7 +465,7 @@
                 const data = await res.json();
                 currentGraph = data;
                 renderGraph(data);
-                infoDiv.textContent = `読み込みました: ${name}`;
+                infoDiv.textContent = `Loaded: ${name}`;
             } catch (e) {
                 errorDiv.textContent = e.message;
             }
@@ -419,44 +496,49 @@
             ctx.restore();
         }
 
-        function drawFacesAndOrientation(ctx) {
-            drawFaces(ctx);
+        function drawOrientationOverlay(ctx) {
             if (!showOrientationArrows || !regionBoundaryArrows || !network) return;
             const positions = network.getPositions();
             ctx.save();
             ctx.lineWidth = 2.0;
-            ctx.strokeStyle = '#333';
-            ctx.fillStyle = '#333';
+            ctx.strokeStyle = '#66e3ff';
+            ctx.fillStyle = '#66e3ff';
+            ctx.shadowColor = '#66e3ff';
+            ctx.shadowBlur = 6;
             for (const e of regionBoundaryArrows) {
                 const p0 = positions[e.from];
                 const p1 = positions[e.to];
                 if (!p0 || !p1) continue;
-                drawArrow(ctx, p0, p1, 18, 7);
+                drawArrow(ctx, p0, p1, 18, 7, 0.52);
+                drawFlowTrail(ctx, p0, p1, 0.42, 10, '#66e3ff');
             }
             ctx.restore();
             if (!optimizedInternalArrows || optimizedInternalArrows.length === 0) return;
             ctx.save();
-            ctx.lineWidth = 2.4;
-            ctx.strokeStyle = '#d93025';
-            ctx.fillStyle = '#d93025';
+            ctx.lineWidth = 2.8;
+            ctx.strokeStyle = '#ff4df0';
+            ctx.fillStyle = '#ff4df0';
+            ctx.shadowColor = '#ff4df0';
+            ctx.shadowBlur = 12;
             for (const e of optimizedInternalArrows) {
                 const p0 = positions[e.from];
                 const p1 = positions[e.to];
                 if (!p0 || !p1) continue;
-                drawArrow(ctx, p0, p1, 22, 9);
+                drawArrow(ctx, p0, p1, 28, 11, 0.56);
+                drawFlowTrail(ctx, p0, p1, 0.56, 14, '#ff4df0');
             }
             ctx.restore();
         }
 
-        function drawArrow(ctx, from, to, length, headSize) {
+        function drawArrow(ctx, from, to, length, headSize, offsetRatio = 0.5) {
             const dx = to.x - from.x;
             const dy = to.y - from.y;
             const d = Math.hypot(dx, dy);
             if (d < 1e-6) return;
             const ux = dx / d;
             const uy = dy / d;
-            const mx = (from.x + to.x) / 2;
-            const my = (from.y + to.y) / 2;
+            const mx = from.x + dx * offsetRatio;
+            const my = from.y + dy * offsetRatio;
             const ex = mx + ux * length;
             const ey = my + uy * length;
             ctx.beginPath();
@@ -473,6 +555,51 @@
             ctx.lineTo(hx - px, hy - py);
             ctx.closePath();
             ctx.fill();
+        }
+
+        function drawFlowTrail(ctx, from, to, speed, step, color) {
+            const now = performance.now() * 0.001;
+            const phase = (now * speed) % 1;
+            const dx = to.x - from.x;
+            const dy = to.y - from.y;
+            const d = Math.hypot(dx, dy);
+            if (d < 30) return;
+            const ux = dx / d;
+            const uy = dy / d;
+            const markerCount = Math.max(2, Math.floor(d / 90));
+            for (let i = 0; i < markerCount; i++) {
+                const t = (phase + i / markerCount) % 1;
+                const px = from.x + dx * t;
+                const py = from.y + dy * t;
+                const x0 = px - ux * step * 0.85;
+                const y0 = py - uy * step * 0.85;
+                const x1 = px + ux * step * 0.85;
+                const y1 = py + uy * step * 0.85;
+                ctx.save();
+                ctx.globalAlpha = 0.95;
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2.4;
+                ctx.beginPath();
+                ctx.moveTo(x0, y0);
+                ctx.lineTo(x1, y1);
+                ctx.stroke();
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(px, py, 2.2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        function ensureArrowAnimation() {
+            if (animationFrameId !== null) return;
+            const loop = () => {
+                if (network && showOrientationArrows) {
+                    network.redraw();
+                }
+                animationFrameId = requestAnimationFrame(loop);
+            };
+            animationFrameId = requestAnimationFrame(loop);
         }
 
         function randomPastel(seed) {
@@ -862,11 +989,11 @@
             const infoDiv = document.getElementById('info');
             errorDiv.textContent = '';
             if (!currentGraph) {
-                errorDiv.textContent = '先にグラフを生成してください';
+                errorDiv.textContent = 'Please generate a graph first';
                 return;
             }
             if (!currentFaceRegions || !latestFacesAll) {
-                errorDiv.textContent = '先に閉領域分割を実行してください';
+                errorDiv.textContent = 'Please run region splitting first';
                 return;
             }
             const seedFace = parseInt(document.getElementById('seed-face').value);
@@ -907,7 +1034,7 @@
                     currentFaceRegions,
                     isNaN(seedFace) ? null : seedFace
                 );
-                infoDiv.textContent = `向きを表示しました（基準領域: ${isNaN(seedFace) ? '-' : seedFace} / ${orientation}）`;
+                infoDiv.textContent = `Orientation displayed (seed region: ${isNaN(seedFace) ? '-' : seedFace} / ${orientation})`;
                 network.redraw();
             } catch (e) {
                 errorDiv.textContent = e.message;
@@ -926,7 +1053,7 @@
                     continue;
                 }
                 if (map.get(key) !== sign) {
-                    throw new Error(`境界辺の向きが矛盾しています: ${key}`);
+                    throw new Error(`Boundary edge orientation conflict: ${key}`);
                 }
             }
             const fixed = [];
@@ -948,11 +1075,11 @@
             const infoDiv = document.getElementById('info');
             errorDiv.textContent = '';
             if (!currentGraph) {
-                errorDiv.textContent = '先にグラフを生成してください';
+                errorDiv.textContent = 'Please generate a graph first';
                 return;
             }
             if (!regionBoundaryArrows || regionBoundaryArrows.length === 0) {
-                errorDiv.textContent = '先に向き表示を実行してください';
+                errorDiv.textContent = 'Please run orientation display first';
                 return;
             }
 
@@ -987,12 +1114,12 @@
                 const uvCount = m.unreachable_vertex_count ?? 0;
                 const uvList = m.unreachable_vertices || [];
                 infoDiv.textContent = [
-                    `内部向きを最適化しました(赤矢印: ${optimizedInternalArrows.length}本)`,
-                    `平均距離=${(m.average_distance ?? 0).toFixed(2)}`,
-                    `到達不能=${m.unreachable_pairs ?? 0}`,
-                    `到達不能頂点=${uvCount}${uvCount > 0 ? `(${uvList.join(',')})` : ''}`,
-                    `負荷二乗和=${(m.load_square_sum ?? 0).toFixed(1)}`,
-                    `最大負荷=${(m.max_load ?? 0).toFixed(1)}`,
+                    `Internal orientation optimized (red arrows: ${optimizedInternalArrows.length})`,
+                    `Average distance=${(m.average_distance ?? 0).toFixed(2)}`,
+                    `Unreachable pairs=${m.unreachable_pairs ?? 0}`,
+                    `Unreachable vertices=${uvCount}${uvCount > 0 ? ` (${uvList.join(',')})` : ''}`,
+                    `Load square sum=${(m.load_square_sum ?? 0).toFixed(1)}`,
+                    `Max load=${(m.max_load ?? 0).toFixed(1)}`,
                 ].join(' / ');
                 network.redraw();
             } catch (e) {
