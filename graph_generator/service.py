@@ -13,18 +13,22 @@ except Exception:  # pragma: no cover
     SimulatedAnnealingSampler = None
 
 
-def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
-    """planar_layout を正方形に引き伸ばし、4種の力で最適化する（交差0保証）。"""
+def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
+    """Fruchterman-Reingold 型の力学モデルでレイアウト最適化（交差0保証）。
+
+    力: (1) 全ペア反発 k²/d, (2) 辺引力 d²/k, (3) 頂点-辺反発,
+        (4) 角度均等化, (5) ソフト境界引力。交差が生じる移動はリバート。
+    """
     nodes = sorted(G.nodes())
     n = len(nodes)
     edges = list(G.edges())
     E = len(edges)
-    edge_arr = np.array(edges, dtype=int)
+    edge_arr = np.array(edges, dtype=int) if E > 0 else np.zeros((0, 2), dtype=int)
     adj = [list(G.neighbors(v)) for v in range(n)]
     margin = side * 0.04
     fixed = set() if fixed is None else set(fixed)
 
-    # 初期配置: planar_layout → 正方形全体にスケーリング（アフィン変換は交差0を保持）
+    # 初期配置
     planar_pos = initial_pos if initial_pos is not None else nx.planar_layout(G)
     pos = np.zeros((n, 2))
     for v in range(n):
@@ -37,6 +41,12 @@ def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
             pos[:, dim] = (pos[:, dim] - mn) / rng * (side - 2 * margin) + margin
         else:
             pos[:, dim] = side / 2
+
+    # 理想辺長 k = sqrt(area / n)（F-R の正規化定数）
+    k = math.sqrt((side * side) / max(n, 2))
+    k2 = k * k
+    vertex_edge_radius = k * 0.6  # 頂点-辺反発の有効距離
+    center = np.array([side / 2, side / 2])
 
     def seg_cross(a, b, c, d):
         d1 = (d[0]-c[0])*(a[1]-c[1]) - (d[1]-c[1])*(a[0]-c[0])
@@ -59,59 +69,69 @@ def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
 
     for it in range(iterations):
         t = 1.0 - it / iterations
-        step = side * 0.07 * t
+        step = k * 0.20 * t  # 最大変位（冷却スケジュール）
         if step < 1e-8:
             break
 
         disp = np.zeros((n, 2))
 
-        # 力1: 全頂点ペア間の反発（位置分散の最大化）
+        # 力1: F-R 反発 k²/d（全頂点ペア）
         for i in range(n):
             diff = pos[i] - pos
             dist = np.linalg.norm(diff, axis=1)
             dist = np.maximum(dist, 1e-6)
             mask = np.ones(n, dtype=bool)
             mask[i] = False
-            f = diff[mask] / dist[mask, None] * (step / dist[mask, None])
+            f = diff[mask] / dist[mask, None] * (k2 / dist[mask, None])
             disp[i] += f.sum(axis=0)
 
-        # 力2: エッジ長の総和を最大化
+        # 力2: F-R 引力 d²/k（辺端点間、ばね）
         for ei in range(E):
             u, v = edge_arr[ei]
             diff = pos[u] - pos[v]
             dist = max(np.linalg.norm(diff), 1e-6)
-            f = diff / dist * (step * 3.0 / dist)
-            disp[u] += f
-            disp[v] -= f
+            f = diff / dist * (dist * dist / k)
+            disp[u] -= f
+            disp[v] += f
 
-        # 力3: 隣接辺間の距離を最大化
+        # 力3: 頂点-辺反発（非端点頂点が辺に近づきすぎるのを防ぐ）
+        for ei in range(E):
+            e0, e1 = edge_arr[ei]
+            a = pos[e0]; b = pos[e1]
+            ab = b - a
+            ab2 = ab.dot(ab)
+            if ab2 < 1e-12:
+                continue
+            for vn in range(n):
+                if vn == e0 or vn == e1:
+                    continue
+                tp = np.clip((pos[vn] - a).dot(ab) / ab2, 0.0, 1.0)
+                closest = a + tp * ab
+                diff = pos[vn] - closest
+                d = np.linalg.norm(diff)
+                if d < 1e-6 or d >= vertex_edge_radius:
+                    continue
+                mag = (k2 * 0.35) * (1.0 / d - 1.0 / vertex_edge_radius) / d
+                f = diff * (mag / d)
+                disp[vn] += f
+                disp[e0] -= f * 0.4
+                disp[e1] -= f * 0.4
+
+        # 力4: 角度均等化（各頂点の周囲エッジを等角配置）
         for vn in range(n):
             nbrs = adj[vn]
-            for i in range(len(nbrs)):
-                for j in range(i + 1, len(nbrs)):
-                    u, w = nbrs[i], nbrs[j]
-                    diff = pos[u] - pos[w]
-                    dist = max(np.linalg.norm(diff), 1e-6)
-                    f = diff / dist * (step * 2.0 / dist)
-                    disp[u] += f
-                    disp[w] -= f
-
-        # 力4: 角度均等化
-        for vn in range(n):
-            nbrs = adj[vn]
-            k = len(nbrs)
-            if k < 2:
+            deg = len(nbrs)
+            if deg < 2:
                 continue
             angle_list = []
             for u in nbrs:
                 d = pos[u] - pos[vn]
                 angle_list.append((math.atan2(d[1], d[0]), u))
             angle_list.sort()
-            for idx in range(k):
-                _, uc = angle_list[idx]
-                ac = angle_list[idx][0]
-                an = angle_list[(idx + 1) % k][0]
-                ap = angle_list[(idx - 1) % k][0]
+            for idx in range(deg):
+                ac, uc = angle_list[idx]
+                an = angle_list[(idx + 1) % deg][0]
+                ap = angle_list[(idx - 1) % deg][0]
                 ga = an - ac
                 if ga <= 0: ga += 2.0 * math.pi
                 gb = ac - ap
@@ -122,11 +142,19 @@ def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
                     continue
                 dv = (pos[uc] - pos[vn]) / du
                 perp = np.array([-dv[1], dv[0]])
-                disp[uc] += perp * dev * step * 1.5
+                disp[uc] += perp * dev * k * 0.4
 
-        # 力を適用（交差が生じる移動はリバート）
+        # 力5: ソフト中心引力（境界にべたつかせない）
+        for vn in range(n):
+            to_c = center - pos[vn]
+            d = np.linalg.norm(to_c)
+            if d > 1e-6:
+                disp[vn] += to_c / d * (k * 0.05)
+
+        # 適用（step でクランプ、交差したらリバート）
         order = list(range(n))
         random.shuffle(order)
+        max_disp = 0.0
         for vn in order:
             if vn in fixed:
                 continue
@@ -135,11 +163,26 @@ def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
                 continue
             if d > step:
                 disp[vn] = disp[vn] / d * step
-            new_pos = np.clip(pos[vn] + disp[vn], margin, side - margin)
+            new_pos = pos[vn] + disp[vn]
+            # ソフト境界：枠外に出た分を減衰
+            for dim in range(2):
+                if new_pos[dim] < margin:
+                    new_pos[dim] = margin + (new_pos[dim] - margin) * 0.3
+                elif new_pos[dim] > side - margin:
+                    new_pos[dim] = (side - margin) + (new_pos[dim] - (side - margin)) * 0.3
+            new_pos = np.clip(new_pos, margin * 0.3, side - margin * 0.3)
             old_pos = pos[vn].copy()
             pos[vn] = new_pos
             if has_crossing(vn):
                 pos[vn] = old_pos
+            else:
+                moved = np.linalg.norm(new_pos - old_pos)
+                if moved > max_disp:
+                    max_disp = moved
+
+        # 収束判定
+        if max_disp < k * 1e-3:
+            break
 
     return {v: pos[v] for v in range(n)}
 
@@ -298,7 +341,7 @@ def generate_connected_graph(
 
     outer_face = max(faces, key=face_area) if faces else list(G.nodes())
     tut_pos, fixed = _tutte_layout(G, outer_face, side, iterations=600)
-    pos = _optimize_layout(G, side, iterations=150, initial_pos=tut_pos, fixed=fixed)
+    pos = _optimize_layout(G, side, iterations=300, initial_pos=tut_pos, fixed=fixed)
 
     positions = {
         int(v): {"x": float(pos[v][0]), "y": float(pos[v][1])}
