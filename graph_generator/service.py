@@ -48,24 +48,50 @@ def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
     vertex_edge_radius = k * 0.6  # 頂点-辺反発の有効距離
     center = np.array([side / 2, side / 2])
 
-    def seg_cross(a, b, c, d):
-        d1 = (d[0]-c[0])*(a[1]-c[1]) - (d[1]-c[1])*(a[0]-c[0])
-        d2 = (d[0]-c[0])*(b[1]-c[1]) - (d[1]-c[1])*(b[0]-c[0])
-        d3 = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
-        d4 = (b[0]-a[0])*(d[1]-a[1]) - (b[1]-a[1])*(d[0]-a[0])
-        return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+    # 交差チェックで使う全辺端点の先行取得（pos のビューなので最新）
+    e0_all = edge_arr[:, 0] if E > 0 else np.zeros(0, dtype=int)
+    e1_all = edge_arr[:, 1] if E > 0 else np.zeros(0, dtype=int)
+    adj_arr = [np.asarray(nbrs, dtype=int) for nbrs in adj]
 
     def has_crossing(v):
-        pv = pos[v]
-        for u in adj[v]:
-            pu = pos[u]
-            for ei in range(E):
-                e0, e1 = edge_arr[ei]
-                if e0 == v or e1 == v or e0 == u or e1 == u:
-                    continue
-                if seg_cross(pv, pu, pos[e0], pos[e1]):
-                    return True
-        return False
+        """頂点 v の入射辺が非隣接辺と交差するかをベクトル化して判定。"""
+        nbrs = adj_arr[v]
+        if E == 0 or nbrs.size == 0:
+            return False
+        # 入射辺: (v, u) for u in nbrs
+        a = pos[v]                      # (2,)
+        b = pos[nbrs]                   # (M, 2)
+        c = pos[e0_all]                 # (E, 2)
+        d = pos[e1_all]                 # (E, 2)
+
+        # (M, E) テンソルで符号付き外積を一括計算
+        dcx = d[:, 0] - c[:, 0]
+        dcy = d[:, 1] - c[:, 1]
+        acy = a[1] - c[:, 1]            # (E,)
+        acx = a[0] - c[:, 0]
+        bcy = b[:, None, 1] - c[None, :, 1]   # (M, E)
+        bcx = b[:, None, 0] - c[None, :, 0]
+
+        d1 = dcx * acy - dcy * acx           # (E,)
+        d2 = dcx[None, :] * bcy - dcy[None, :] * bcx   # (M, E)
+
+        bax = b[:, None, 0] - a[0]           # (M, 1) broadcasted
+        bay = b[:, None, 1] - a[1]
+        cay = c[None, :, 1] - a[1]
+        cax = c[None, :, 0] - a[0]
+        day = d[None, :, 1] - a[1]
+        dax = d[None, :, 0] - a[0]
+
+        d3 = bax * cay - bay * cax           # (M, E)
+        d4 = bax * day - bay * dax           # (M, E)
+
+        cross = ((d1[None, :] > 0) != (d2 > 0)) & ((d3 > 0) != (d4 > 0))
+
+        # 端点共有ペアを除外
+        shares_v = (e0_all == v) | (e1_all == v)                         # (E,)
+        shares_u = (e0_all[None, :] == nbrs[:, None]) | (e1_all[None, :] == nbrs[:, None])
+        cross &= ~(shares_v[None, :] | shares_u)
+        return bool(cross.any())
 
     for it in range(iterations):
         t = 1.0 - it / iterations
