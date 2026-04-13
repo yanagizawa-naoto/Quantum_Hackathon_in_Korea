@@ -94,28 +94,34 @@ def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
             disp[u] -= f
             disp[v] += f
 
-        # 力3: 頂点-辺反発（非端点頂点が辺に近づきすぎるのを防ぐ）
-        for ei in range(E):
-            e0, e1 = edge_arr[ei]
-            a = pos[e0]; b = pos[e1]
-            ab = b - a
-            ab2 = ab.dot(ab)
-            if ab2 < 1e-12:
-                continue
-            for vn in range(n):
-                if vn == e0 or vn == e1:
-                    continue
-                tp = np.clip((pos[vn] - a).dot(ab) / ab2, 0.0, 1.0)
-                closest = a + tp * ab
-                diff = pos[vn] - closest
-                d = np.linalg.norm(diff)
-                if d < 1e-6 or d >= vertex_edge_radius:
-                    continue
-                mag = (k2 * 0.35) * (1.0 / d - 1.0 / vertex_edge_radius) / d
-                f = diff * (mag / d)
-                disp[vn] += f
-                disp[e0] -= f * 0.4
-                disp[e1] -= f * 0.4
+        # 力3: 頂点-辺反発（ベクトル化、非端点頂点が辺に近づきすぎるのを防ぐ）
+        if E > 0:
+            e0_arr = edge_arr[:, 0]
+            e1_arr = edge_arr[:, 1]
+            a_arr = pos[e0_arr]                         # (E, 2)
+            ab = pos[e1_arr] - a_arr                    # (E, 2)
+            ab2 = (ab * ab).sum(axis=1)                 # (E,)
+            ab2_safe = np.maximum(ab2, 1e-12)
+
+            rel = pos[:, None, :] - a_arr[None, :, :]   # (n, E, 2)
+            tp = (rel * ab[None, :, :]).sum(axis=-1) / ab2_safe[None, :]
+            tp = np.clip(tp, 0.0, 1.0)
+            closest = a_arr[None, :, :] + tp[:, :, None] * ab[None, :, :]
+            diff_ve = pos[:, None, :] - closest         # (n, E, 2)
+            d_ve = np.linalg.norm(diff_ve, axis=-1)     # (n, E)
+
+            vn_idx = np.arange(n)[:, None]
+            endpoint = (vn_idx == e0_arr[None, :]) | (vn_idx == e1_arr[None, :])
+            active = (~endpoint) & (d_ve > 1e-6) & (d_ve < vertex_edge_radius)
+            d_safe = np.where(active, d_ve, 1.0)
+            mag = (k2 * 0.35) * (1.0 / d_safe - 1.0 / vertex_edge_radius) / d_safe
+            mag = np.where(active, mag, 0.0)
+            force = diff_ve * (mag / d_safe)[:, :, None]   # (n, E, 2)
+
+            disp += force.sum(axis=1)
+            edge_force_sum = force.sum(axis=0)          # (E, 2)
+            np.add.at(disp, e0_arr, -edge_force_sum * 0.4)
+            np.add.at(disp, e1_arr, -edge_force_sum * 0.4)
 
         # 力4: 角度均等化（各頂点の周囲エッジを等角配置）
         for vn in range(n):
@@ -235,17 +241,24 @@ def _tutte_layout(G, outer_face, side, iterations=600):
 
 
 def generate_connected_graph(
-    num_vertices: int, num_edges: Optional[int] = None
+    num_vertices: int,
+    num_edges: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> dict:
     """葉のない連結な平面グラフをランダム生成する（エッジ交差なし）。
 
     アルゴリズム:
     1. 全辺をランダム順に試し、平面性を保つ辺のみ追加して極大平面グラフを構築
     2. 連結性と最小次数2を維持しながらランダムに辺を削除して目標辺数に近づける
-    3. planar_layout を正方形にスケーリング → 4種の力で最適化（交差0保証）
+       （複数回シャッフル再試行）
+    3. planar_layout を正方形にスケーリング → F-R 型の力で最適化（交差0保証）
 
-    任意の連結・葉なし・平面グラフを生成するポテンシャルを持つ。
+    seed を指定すると同じグラフを再生成できる。
     """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
     n = num_vertices
     if n < 3:
         raise ValueError("葉なし連結グラフには頂点数3以上が必要です")
@@ -290,18 +303,26 @@ def generate_connected_graph(
         if has_bridge(G):
             continue
 
-        # ステップ2: 辺を削除して目標辺数に近づける（橋を作らない）
-        edges_list = list(G.edges())
-        random.shuffle(edges_list)
-
-        for u, v in edges_list:
+        # ステップ2: 辺を削除して目標辺数に近づける（橋を作らない、複数回シャッフル）
+        removal_rounds = 5
+        for _ in range(removal_rounds):
             if G.number_of_edges() <= num_edges:
                 break
-            if G.degree(u) <= 2 or G.degree(v) <= 2:
-                continue
-            G.remove_edge(u, v)
-            if (not nx.is_connected(G)) or has_bridge(G):
-                G.add_edge(u, v)
+            edges_list = list(G.edges())
+            random.shuffle(edges_list)
+            removed_any = False
+            for u, v in edges_list:
+                if G.number_of_edges() <= num_edges:
+                    break
+                if G.degree(u) <= 2 or G.degree(v) <= 2:
+                    continue
+                G.remove_edge(u, v)
+                if (not nx.is_connected(G)) or has_bridge(G):
+                    G.add_edge(u, v)
+                else:
+                    removed_any = True
+            if not removed_any:
+                break
 
         if G.number_of_edges() == num_edges and nx.is_connected(G) and not has_bridge(G):
             break

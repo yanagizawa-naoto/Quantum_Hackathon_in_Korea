@@ -17,6 +17,7 @@ router = APIRouter(prefix="/graph", tags=["graph"])
 class GraphRequest(BaseModel):
     num_vertices: int = Field(..., ge=1, description="頂点数")
     num_edges: Optional[int] = Field(None, ge=0, description="エッジ数（省略時はランダム）")
+    seed: Optional[int] = Field(None, description="乱数シード（指定時は再現可能）")
 
 
 class FaceEdge(BaseModel):
@@ -53,7 +54,7 @@ class OptimizeOrientationRequest(BaseModel):
 @router.post("/generate")
 async def generate_graph(request: GraphRequest):
     try:
-        result = generate_connected_graph(request.num_vertices, request.num_edges)
+        result = generate_connected_graph(request.num_vertices, request.num_edges, request.seed)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
