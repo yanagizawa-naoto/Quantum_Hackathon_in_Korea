@@ -290,7 +290,10 @@ def generate_connected_graph(
     max_edges = 3 * n - 6
 
     if num_edges is None:
-        num_edges = random.randint(min_edges, max_edges)
+        # 複雑さと視認性の両立: 最大辺数の 65-75% をターゲット
+        low = max(min_edges, int(max_edges * 0.65))
+        high = max(low, int(max_edges * 0.75))
+        num_edges = random.randint(low, high)
     else:
         if num_edges < min_edges:
             raise ValueError(
