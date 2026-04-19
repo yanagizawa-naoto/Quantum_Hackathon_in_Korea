@@ -839,6 +839,25 @@
                 return count;
             }
 
+            // 候補面と現領域の共有辺数（= merge で増える内部辺の数）
+            function sharedEdgeCount(regionFaces, candidate) {
+                const face = facesInternal[candidate];
+                let shared = 0;
+                for (let j = 0; j < face.length; j++) {
+                    const a = face[j];
+                    const b = face[(j + 1) % face.length];
+                    const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+                    const neighbors = edgeToFaces.get(key) || [];
+                    for (const f of neighbors) {
+                        if (f === outerIdx) continue;
+                        const ia = idToInternal.get(f);
+                        if (ia === candidate) continue;
+                        if (regionFaces.has(ia)) { shared++; break; }
+                    }
+                }
+                return shared;
+            }
+
             let regionId = 0;
             while (unassigned.size > 0) {
                 // seed: unassigned face with largest area
@@ -860,8 +879,8 @@
                 while (grew) {
                     grew = false;
                     let bestCandidate = -1;
-                    let bestBoundary = -1;
-                    let bestAreaLocal = -1;
+                    let bestShared = -1;
+                    let bestFaceLen = Infinity;
 
                     const candidates = [];
                     unassigned.forEach(i => {
@@ -874,12 +893,14 @@
 
                     for (const cand of candidates) {
                         if (wouldCreateInteriorVertex(regionFaces, cand)) continue;
-                        const next = new Set(regionFaces);
-                        next.add(cand);
-                        const bcount = boundaryVertexCount(next);
-                        if (bcount > bestBoundary || (bcount === bestBoundary && areas[cand] > bestAreaLocal)) {
-                            bestBoundary = bcount;
-                            bestAreaLocal = areas[cand];
+                        const shared = sharedEdgeCount(regionFaces, cand);
+                        const flen = facesInternal[cand].length;
+                        // 共有辺数を最大化（= 内部辺の増加を最大化）
+                        // タイブレーク: 面サイズが小さい方を優先（境界増を最小化）
+                        if (shared > bestShared ||
+                            (shared === bestShared && flen < bestFaceLen)) {
+                            bestShared = shared;
+                            bestFaceLen = flen;
                             bestCandidate = cand;
                         }
                     }
