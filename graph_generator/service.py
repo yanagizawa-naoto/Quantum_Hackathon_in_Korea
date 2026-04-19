@@ -14,10 +14,10 @@ except Exception:  # pragma: no cover
 
 
 def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
-    """力学モデルでレイアウト最適化（交差0保証、全力ベクトル化）。
+    """KK stress + 補助力でレイアウト最適化（交差0保証、全力ベクトル化）。
 
-    力: (1) 全ペア反発 k²/d, (2) Hooke ばね（辺長 → k に収束）,
-        (3) 頂点-辺反発, (4) 角度均等化, (5) ソフト中心引力。
+    力: (1) KK stress（グラフ距離≒ユークリッド距離）, (2) 頂点-辺反発,
+        (3) 次数適応角度均等化, (4) deg-2 直線化, (5) ソフト中心引力。
     """
     nodes = sorted(G.nodes())
     n = len(nodes)
@@ -46,6 +46,21 @@ def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
     k2 = k * k
     vertex_edge_radius = k * 0.9
     center = np.array([side / 2, side / 2])
+
+    # KK stress: グラフ距離ベースの目標ユークリッド距離
+    apsp = dict(nx.all_pairs_shortest_path_length(G))
+    target_dist = np.full((n, n), float(n))
+    for i in range(n):
+        for j, d in apsp[i].items():
+            target_dist[i, j] = d * k
+    np.fill_diagonal(target_dist, 1.0)
+    stress_w = 1.0 / (target_dist * target_dist)
+    np.fill_diagonal(stress_w, 0.0)
+
+    # deg-2 頂点（直線化対象）
+    deg2_verts = np.array([v for v in range(n) if len(adj[v]) == 2], dtype=int)
+    if deg2_verts.size > 0:
+        deg2_nbrs = np.array([[adj[v][0], adj[v][1]] for v in deg2_verts])
 
     e0_all = edge_arr[:, 0] if E > 0 else np.zeros(0, dtype=int)
     e1_all = edge_arr[:, 1] if E > 0 else np.zeros(0, dtype=int)
@@ -82,28 +97,27 @@ def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
 
         disp = np.zeros((n, 2))
 
-        # 力1: 全ペア反発 k²/d（完全ベクトル化）
-        diff_all = pos[:, None, :] - pos[None, :, :]       # (n, n, 2)
-        dist_all = np.linalg.norm(diff_all, axis=-1)        # (n, n)
+        # 力1: KK stress（グラフ距離≒ユークリッド距離、全体配置）
+        diff_all = pos[:, None, :] - pos[None, :, :]
+        dist_all = np.linalg.norm(diff_all, axis=-1)
         np.fill_diagonal(dist_all, 1.0)
         dist_all = np.maximum(dist_all, 1e-6)
-        rep_mag = k2 / (dist_all * dist_all)                # k²/d²  → /d for direction
-        force_all = diff_all * (rep_mag / dist_all)[:, :, None]
-        np.fill_diagonal(force_all[:, :, 0], 0.0)
-        np.fill_diagonal(force_all[:, :, 1], 0.0)
-        disp += force_all.sum(axis=1)
+        delta = dist_all - target_dist
+        force_mag = stress_w * delta / dist_all
+        np.fill_diagonal(force_mag, 0.0)
+        disp -= (diff_all * force_mag[:, :, None]).sum(axis=1)
 
-        # 力2: Hooke ばね — 辺長を k に収束（完全ベクトル化）
+        # 力2: Hooke ばね — 辺長を k に収束（KK と併用で辺均一化を強化）
         if E > 0:
-            diff_e = pos[e0_all] - pos[e1_all]              # (E, 2)
+            diff_e = pos[e0_all] - pos[e1_all]
             dist_e = np.linalg.norm(diff_e, axis=1, keepdims=True)
             dist_e = np.maximum(dist_e, 1e-6)
             stretch = np.maximum(dist_e / k, 1.0)
-            f_spring = diff_e / dist_e * (dist_e - k) * stretch
+            f_spring = diff_e / dist_e * (dist_e - k) * stretch * 0.5
             np.add.at(disp, e0_all, -f_spring)
             np.add.at(disp, e1_all,  f_spring)
 
-        # 力3: 頂点-辺反発（ベクトル化、強化）
+        # 力3: 頂点-辺反発（ベクトル化）
         if E > 0:
             a_arr = pos[e0_all]
             ab = pos[e1_all] - a_arr
@@ -128,7 +142,7 @@ def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
             np.add.at(disp, e0_all, -edge_force_sum * 0.4)
             np.add.at(disp, e1_all, -edge_force_sum * 0.4)
 
-        # 力4: 角度均等化（強化）
+        # 力3: 次数適応角度均等化
         for vn in range(n):
             nbrs = adj[vn]
             deg = len(nbrs)
@@ -149,13 +163,24 @@ def _optimize_layout(G, side, iterations=300, initial_pos=None, fixed=None):
             valid = dists_v > 1e-6
             dirs = dvecs[order] / np.maximum(dists_v[:, None], 1e-6)
             perps = np.column_stack([-dirs[:, 1], dirs[:, 0]])
-            nudge = perps * (dev * k * 1.0)[:, None] * valid[:, None]
+            w = k * min(2.0, 0.5 + deg * 0.2)
+            nudge = perps * (dev * w)[:, None] * valid[:, None]
             np.add.at(disp, sorted_nbrs, nudge)
 
-        # 力5: ソフト中心引力（ベクトル化）
+        # 力4: deg-2 直線化（2辺の間の角度を 180° に近づける）
+        if deg2_verts.size > 0:
+            u_pos = pos[deg2_nbrs[:, 0]]
+            w_pos = pos[deg2_nbrs[:, 1]]
+            uw = w_pos - u_pos
+            uw_len = np.maximum(np.linalg.norm(uw, axis=1, keepdims=True), 1e-6)
+            uw_hat = uw / uw_len
+            v_pos = pos[deg2_verts]
+            proj = u_pos + uw_hat * ((v_pos - u_pos) * uw_hat).sum(axis=1, keepdims=True)
+            np.add.at(disp, deg2_verts, (proj - v_pos) * k * 0.6)
+
+        # 力5: ソフト中心引力
         to_c = center[None, :] - pos
-        dist_c = np.linalg.norm(to_c, axis=1, keepdims=True)
-        dist_c = np.maximum(dist_c, 1e-6)
+        dist_c = np.maximum(np.linalg.norm(to_c, axis=1, keepdims=True), 1e-6)
         disp += to_c / dist_c * (k * 0.05)
 
         # 適用（交差リバート）
@@ -358,13 +383,23 @@ def generate_connected_graph(
             area += a[0] * b[1] - b[0] * a[1]
         return abs(area) * 0.5
 
-    outer_face = max(faces, key=face_area) if faces else list(G.nodes())
+    # 外面スコア: 面積大 + 周長大 + 低次数頂点多い → 良い外面
+    def face_score(face_nodes):
+        area = face_area(face_nodes)
+        perim = sum(
+            math.hypot(init_pos[face_nodes[i]][0] - init_pos[face_nodes[(i+1)%len(face_nodes)]][0],
+                       init_pos[face_nodes[i]][1] - init_pos[face_nodes[(i+1)%len(face_nodes)]][1])
+            for i in range(len(face_nodes)))
+        avg_deg = sum(G.degree(v) for v in face_nodes) / len(face_nodes)
+        return area + perim * 0.3 - avg_deg * 0.1
+
+    outer_face = max(faces, key=face_score) if faces else list(G.nodes())
 
     # レイアウト最適化（退化レイアウトは外面を変えてリトライ）
     k_layout = math.sqrt((side * side) / max(n, 2))
     best_pos = None
     best_min_pair = -1.0
-    face_candidates = sorted(faces, key=face_area, reverse=True)[:min(len(faces), 4)]
+    face_candidates = sorted(faces, key=face_score, reverse=True)[:min(len(faces), 4)]
     for trial_face in face_candidates:
         tut_pos, boundary = _tutte_layout(G, trial_face, side, iterations=600)
         trial_pos = _optimize_layout(G, side, iterations=100, initial_pos=tut_pos, fixed=boundary)
