@@ -587,6 +587,208 @@ def compute_planar_faces(
     }
 
 
+def partition_regions_qubo(
+    num_vertices: int,
+    edges: list,
+    positions: dict,
+    num_reads: int = 200,
+    max_regions: Optional[int] = None,
+    onehot_strength: float = 15.0,
+    reward_strength: float = 3.0,
+    interior_strength: float = 12.0,
+    random_seed: Optional[int] = None,
+) -> dict:
+    """QUBO で平面グラフの面を領域に分割する（one-hot 定式化）。
+
+    変数: y_{i,r} ∈ {0,1}  (面 i を領域 r に割り当てる)
+    目的: Σ_{(i,j) 面隣接} Σ_r y_{ir} y_{jr}  (同領域の隣接面ペアを報酬)
+    制約1: 各面は一つの領域に所属  (Σ_r y_{ir} = 1, ソフトペナルティ)
+    制約2: 各非外周頂点 v について、∀r: v の接続面 F_v が全員 r にはならない
+           (ペナルティ Π_{i∈F_v} y_{ir}、Rosenberg reduction で QUBO 化)
+    """
+    import dimod
+
+    if SimulatedAnnealingSampler is None:
+        raise RuntimeError("dwave-ocean-sdk が利用不可")
+
+    n = int(num_vertices)
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for e in edges:
+        G.add_edge(int(e["source"]), int(e["target"]))
+
+    planar, embedding = nx.check_planarity(G)
+    if not planar:
+        raise ValueError("グラフが平面ではありません")
+
+    faces = []
+    seen = set()
+    for u in embedding:
+        for v in embedding.neighbors_cw_order(u):
+            if (u, v) in seen:
+                continue
+            face = embedding.traverse_face(u, v)
+            if len(face) < 3:
+                continue
+            for i in range(len(face)):
+                seen.add((face[i], face[(i + 1) % len(face)]))
+            faces.append(face)
+
+    if not faces:
+        return {"faces": [], "outer_face_index": None, "regions": [],
+                "region_count": 0, "internal_face_ids": [], "qubo_variable_count": 0}
+
+    def get_pos(nid):
+        if nid in positions:
+            return positions[nid]
+        return positions.get(str(nid))
+
+    def face_area_abs(face):
+        a = 0.0
+        m = len(face)
+        for i in range(m):
+            pa = get_pos(face[i]); pb = get_pos(face[(i + 1) % m])
+            a += pa["x"] * pb["y"] - pb["x"] * pa["y"]
+        return abs(a) * 0.5
+
+    outer_idx = int(np.argmax([face_area_abs(f) for f in faces]))
+    outer_vertices = set(faces[outer_idx])
+
+    internal_ids = [i for i in range(len(faces)) if i != outer_idx]
+    F = len(internal_ids)
+    id_to_new = {orig: new for new, orig in enumerate(internal_ids)}
+
+    # 面隣接（同じ辺を共有する面のペア）
+    edge_to_faces = {}
+    for i, face in enumerate(faces):
+        for j in range(len(face)):
+            a = face[j]; b = face[(j + 1) % len(face)]
+            key = (min(a, b), max(a, b))
+            edge_to_faces.setdefault(key, []).append(i)
+
+    adjacent_pairs = set()
+    for flist in edge_to_faces.values():
+        if len(flist) < 2:
+            continue
+        for i in range(len(flist)):
+            for j in range(i + 1, len(flist)):
+                a, b = flist[i], flist[j]
+                if a == outer_idx or b == outer_idx:
+                    continue
+                ia, ib = id_to_new[a], id_to_new[b]
+                adjacent_pairs.add((min(ia, ib), max(ia, ib)))
+
+    # 各非外周頂点の接続内部面 F_v
+    vertex_faces_int = {}  # v_orig → set of new_i
+    for v_orig in range(n):
+        if v_orig in outer_vertices:
+            continue
+        fs = set()
+        valid = True
+        for w in G.neighbors(v_orig):
+            key = (min(v_orig, w), max(v_orig, w))
+            flist = edge_to_faces.get(key, [])
+            if any(f == outer_idx for f in flist):
+                valid = False
+                break
+            for f in flist:
+                fs.add(id_to_new[f])
+        if valid and len(fs) >= 2:
+            vertex_faces_int[v_orig] = fs
+
+    if not adjacent_pairs:
+        regions = list(range(F))
+        return {"faces": faces, "outer_face_index": outer_idx,
+                "internal_face_ids": internal_ids,
+                "regions": regions, "region_count": F,
+                "qubo_variable_count": 0}
+
+    # K: 領域数の上限（実用的に小さめ、F を超えない）
+    K = max_regions if max_regions is not None else min(F, max(4, F // 2))
+
+    def yvar(i, r):
+        return f"y_{i}_{r}"
+
+    poly = {}
+
+    # 制約1: 各面 one-hot  A * (Σ_r y_{ir} - 1)² = A * [-Σ y + 2 Σ_{r<s} y_{ir} y_{is}] + const
+    for i in range(F):
+        for r in range(K):
+            poly[(yvar(i, r),)] = poly.get((yvar(i, r),), 0.0) - onehot_strength
+        for r in range(K):
+            for s in range(r + 1, K):
+                ya, yb = yvar(i, r), yvar(i, s)
+                if ya > yb:
+                    ya, yb = yb, ya
+                poly[(ya, yb)] = poly.get((ya, yb), 0.0) + 2.0 * onehot_strength
+
+    # 目的: -B * Σ_{(i,j) 隣接} Σ_r y_{ir} y_{jr}
+    for (i, j) in adjacent_pairs:
+        for r in range(K):
+            ya, yb = yvar(i, r), yvar(j, r)
+            if ya > yb:
+                ya, yb = yb, ya
+            poly[(ya, yb)] = poly.get((ya, yb), 0.0) - reward_strength
+
+    # 制約2: 内部頂点禁止  C * Π_{i∈F_v} y_{ir} per (v, r)
+    for v_orig, faces_v in vertex_faces_int.items():
+        for r in range(K):
+            key = tuple(sorted(yvar(i, r) for i in faces_v))
+            poly[key] = poly.get(key, 0.0) + interior_strength
+
+    # 高次 → BQM
+    reduction_strength = max(onehot_strength, interior_strength) * 2.0
+    bqm = dimod.make_quadratic(poly, strength=reduction_strength, vartype="BINARY")
+
+    sampler = SimulatedAnnealingSampler()
+    if random_seed is not None:
+        sampleset = sampler.sample(bqm, num_reads=num_reads, seed=int(random_seed))
+    else:
+        sampleset = sampler.sample(bqm, num_reads=num_reads)
+    best = sampleset.first.sample
+    energy = float(sampleset.first.energy)
+
+    # デコード: 各面 i が y_{ir}=1 の r に所属。one-hot 違反時は報酬最大の r を選ぶ。
+    regions = [0] * F
+    onehot_violations = 0
+    for i in range(F):
+        assigned = [r for r in range(K) if best.get(yvar(i, r), 0) == 1]
+        if len(assigned) == 1:
+            regions[i] = assigned[0]
+        elif len(assigned) == 0:
+            regions[i] = 0  # 割り当てなし → 仮 0
+            onehot_violations += 1
+        else:
+            regions[i] = assigned[0]
+            onehot_violations += 1
+
+    unique = {r: k for k, r in enumerate(sorted(set(regions)))}
+    regions = [unique[r] for r in regions]
+
+    # 内部頂点違反検出
+    def violations_of(regions_):
+        out = []
+        for v_orig, faces_v in vertex_faces_int.items():
+            if len({regions_[f] for f in faces_v}) == 1:
+                out.append(v_orig)
+        return out
+
+    violations = violations_of(regions)
+
+    return {
+        "faces": faces,
+        "outer_face_index": outer_idx,
+        "internal_face_ids": internal_ids,
+        "regions": regions,
+        "region_count": len(unique),
+        "qubo_variable_count": int(len(bqm.variables)),
+        "qubo_energy": energy,
+        "interior_vertex_violations": violations,
+        "onehot_violations": int(onehot_violations),
+        "max_regions_K": int(K),
+    }
+
+
 def optimize_edge_orientations(
     num_vertices: int,
     edges: list,

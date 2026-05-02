@@ -6,6 +6,7 @@ from graph_generator.service import (
     generate_connected_graph,
     compute_planar_faces,
     optimize_edge_orientations,
+    partition_regions_qubo,
     save_graph_json,
     list_saved_graphs,
     load_graph_json,
@@ -49,6 +50,15 @@ class OptimizeOrientationRequest(BaseModel):
     edges: list[FaceEdge]
     fixed_edges: list[FaceEdge] = Field(default_factory=list, description="固定向きの辺")
     max_iterations: int = Field(1200, ge=100, le=10000, description="最適化反復数")
+
+
+class PartitionQuboRequest(BaseModel):
+    num_vertices: int = Field(..., ge=1, description="頂点数")
+    edges: list[FaceEdge]
+    positions: dict[int, FacePosition]
+    num_reads: int = Field(150, ge=10, le=2000, description="SA のサンプリング回数")
+    constraint_strength: float = Field(3.0, gt=0, description="内部頂点禁止の罰則強度")
+    seed: Optional[int] = Field(None, description="乱数シード")
 
 
 @router.post("/generate")
@@ -114,4 +124,20 @@ async def optimize_orientation(request: OptimizeOrientationRequest):
         )
         return result
     except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/partition-qubo")
+async def partition_regions(request: PartitionQuboRequest):
+    try:
+        result = partition_regions_qubo(
+            num_vertices=request.num_vertices,
+            edges=[e.model_dump() for e in request.edges],
+            positions={int(k): v.model_dump() for k, v in request.positions.items()},
+            num_reads=request.num_reads,
+            constraint_strength=request.constraint_strength,
+            random_seed=request.seed,
+        )
+        return result
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))

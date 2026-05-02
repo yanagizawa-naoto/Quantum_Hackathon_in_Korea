@@ -4,3 +4,4 @@ __pycache__/
 .idea
 
 graph_generator/saved/
+.playwright-mcp/
