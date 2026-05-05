@@ -1,8 +1,7 @@
 import networkx as nx
-from typing import List, Tuple, Set
 
 def calculate_total_apsp_distance(
-    vertices: Set[int], edges: List[Tuple[int, int]], is_directed: bool
+    vertices: set[int], edges: list[tuple[int, int]], is_directed: bool
 ) -> float:
     """
     Calculates the sum of all-pairs shortest path (APSP) lengths for a given graph.
@@ -29,6 +28,13 @@ def calculate_total_apsp_distance(
     
     # networkx.all_pairs_shortest_path_length returns an iterator of (source, {target: length})
     path_lengths = dict(nx.all_pairs_shortest_path_length(G))
+
+    if is_directed:
+      if not nx.is_strongly_connected(G):
+        return -1
+    else:
+      if not nx.is_connected(G):
+        return -1
 
     # Sum up all the path lengths
     for source in vertices:

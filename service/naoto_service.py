@@ -5,6 +5,9 @@ from typing import Optional
 import networkx as nx
 import numpy as np
 
+from domain import WeightedGraph
+from service.optimization_service import WeightedOptimizationService
+
 
 def _optimize_layout(G, side, iterations=150, initial_pos=None, fixed=None):
     """planar_layout を正方形に引き伸ばし、4種の力で最適化する（交差0保証）。"""
@@ -661,3 +664,26 @@ def _evaluate_orientation_metrics(num_vertices: int, undirected_edges: list, ori
         "load_square_sum": load_square_sum,
         "max_load": max_load,
     }
+
+
+class NaotoService(WeightedOptimizationService):
+
+  def optimize(self, graph: WeightedGraph) -> list[tuple[int, int]]:
+    if graph.is_empty():
+      return []
+
+    vertices = sorted(graph.get_vertices())
+    v_to_idx = {v: i for i, v in enumerate(vertices)}
+    idx_to_v = {i: v for i, v in enumerate(vertices)}
+
+    edges = [
+      {"source": v_to_idx[e.vertices[0]], "target": v_to_idx[e.vertices[1]]}
+      for e in graph.edges
+    ]
+
+    result = optimize_edge_orientations(
+      num_vertices=len(vertices),
+      edges=edges,
+    )
+
+    return [(idx_to_v[d["source"]], idx_to_v[d["target"]]) for d in result["directed_edges"]]
